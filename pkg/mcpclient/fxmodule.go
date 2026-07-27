@@ -282,7 +282,7 @@ func buildMcpHTTPTransport(logger *slog.Logger, loggingCfg *config.LoggingConfig
 	//   1. Static headers apply operator headers to the configured MCP origin.
 	//   2. Forwarding injects per-request connector headers last so they win conflicts.
 	//   3. Logging wraps otel instrumentation so raw dumps include final headers.
-	//   4. otelhttp instrumentation sits closest to the network to record final calls.
+	//   4. otelhttp instrumentation and its route labeler sit close to the network to record final calls.
 	base, err := tctransport.CloneDefaultWithBundle(tlsBundle)
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: %w", err)
@@ -306,10 +306,10 @@ func buildMcpHTTPTransport(logger *slog.Logger, loggingCfg *config.LoggingConfig
 			withoutClientCertificate: base,
 		}
 	}
+	base = tcmetrics.WithHTTPClientMetricAttributes(base)
 	base = otelhttp.NewTransport(
 		base,
 		otelhttp.WithMeterProvider(meterProvider),
-		tcmetrics.WithHTTPClientMetricAttributesFn(),
 	)
 	forwardingLogger := logger.With(
 		slog.String(tclog.FieldComponent, tclog.ComponentMcpClient),

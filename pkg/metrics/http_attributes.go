@@ -23,7 +23,18 @@ func MetricAttributesForRequest(req *http.Request) []attribute.KeyValue {
 	}
 }
 
-// WithHTTPClientMetricAttributesFn wraps MetricAttributesForRequest for otelhttp transports.
-func WithHTTPClientMetricAttributesFn() otelhttp.Option {
-	return otelhttp.WithMetricAttributesFn(MetricAttributesForRequest)
+type httpClientMetricAttributesRoundTripper struct {
+	base http.RoundTripper
+}
+
+// WithHTTPClientMetricAttributes adds common HTTP attributes to the enclosing otelhttp transport.
+func WithHTTPClientMetricAttributes(base http.RoundTripper) http.RoundTripper {
+	return &httpClientMetricAttributesRoundTripper{base: base}
+}
+
+func (t *httpClientMetricAttributesRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if labeler, ok := otelhttp.LabelerFromContext(req.Context()); ok {
+		labeler.Add(MetricAttributesForRequest(req)...)
+	}
+	return t.base.RoundTrip(req)
 }

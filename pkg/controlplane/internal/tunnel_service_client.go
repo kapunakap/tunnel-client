@@ -259,7 +259,7 @@ func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *t
 	// Order matters (outermost to innermost):
 	//   1. Control-plane round tripper applies auth headers before anything else.
 	//   2. Logging wraps otel instrumentation so dumps include the final headers.
-	//   3. otelhttp instrumentation sits close to the network for accurate metrics.
+	//   3. otelhttp instrumentation and its route labeler sit close to the network for accurate metrics.
 	//   4. Response receipt recording sits closest to the network so outer response
 	//      middleware cannot delay the timestamp by consuming the response body.
 	base, err := tctransport.CloneDefaultWithBundle(tlsBundle)
@@ -283,10 +283,10 @@ func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *t
 		return nil, fmt.Errorf("controlplane client: %w", err)
 	}
 	base = newResponseReceiptRoundTripper(base)
+	base = tcmetrics.WithHTTPClientMetricAttributes(base)
 	base = otelhttp.NewTransport(
 		base,
 		otelhttp.WithMeterProvider(meterProvider),
-		tcmetrics.WithHTTPClientMetricAttributesFn(),
 	)
 	base = tclog.NewRoundTripper(base, logger, loggingCfg, tclog.ComponentControlPlane)
 

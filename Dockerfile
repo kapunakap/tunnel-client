@@ -1,4 +1,4 @@
-# syntax=openaiapibase.azurecr.io/mirror/docker/dockerfile:1@sha256:9857836c9ee4268391bb5b09f9f157f3c91bb15821bb77969642813b0d00518d
+# syntax=docker/dockerfile:1.6
 
 ARG BASE_BUILDER_IMAGE=golang:1.26.2-alpine
 ARG BASE_UI_BUILDER_IMAGE=node:22-alpine
@@ -9,24 +9,44 @@ ARG PROJECT_ROOT=.
 FROM ${BASE_UI_BUILDER_IMAGE} AS ui-builder
 ARG PROJECT_ROOT=.
 WORKDIR /repo
-COPY package.json /tmp/openai-root-package.json
-RUN --mount=type=secret,id=COREPACK_NPM_REGISTRY,env=COREPACK_NPM_REGISTRY \
-    --mount=type=secret,id=NPM_CONFIG_REGISTRY,env=NPM_CONFIG_REGISTRY \
-    --mount=type=secret,id=npm_config_registry,env=npm_config_registry \
-    --mount=type=secret,id=PNPM_CONFIG_REGISTRY,env=PNPM_CONFIG_REGISTRY \
-    --mount=type=secret,id=pnpm_config_registry,env=pnpm_config_registry \
-    corepack enable pnpm \
-    && corepack prepare "$(node -p 'require("/tmp/openai-root-package.json").packageManager')" --activate
+RUN --mount=type=bind,source=.,target=/context,ro \
+    --mount=type=secret,id=COREPACK_NPM_REGISTRY \
+    --mount=type=secret,id=NPM_CONFIG_REGISTRY \
+    --mount=type=secret,id=npm_config_registry \
+    --mount=type=secret,id=PNPM_CONFIG_REGISTRY \
+    --mount=type=secret,id=pnpm_config_registry \
+    for registry_secret in \
+      COREPACK_NPM_REGISTRY \
+      NPM_CONFIG_REGISTRY \
+      npm_config_registry \
+      PNPM_CONFIG_REGISTRY \
+      pnpm_config_registry; do \
+      if [ -s "/run/secrets/${registry_secret}" ]; then \
+        export "${registry_secret}=$(cat "/run/secrets/${registry_secret}")"; \
+      fi; \
+    done \
+    && corepack enable pnpm \
+    && corepack prepare "$(node -p 'require(`/context/${process.env.PROJECT_ROOT || "."}/adminui/package.json`).packageManager')" --activate
 COPY ${PROJECT_ROOT}/adminui/package.json ./adminui/
 COPY ${PROJECT_ROOT}/adminui/pnpm-lock.yaml ./adminui/
 COPY ${PROJECT_ROOT}/adminui/pnpm-workspace.yaml ./adminui/
 COPY ${PROJECT_ROOT}/adminui/ ./adminui/
-RUN --mount=type=secret,id=COREPACK_NPM_REGISTRY,env=COREPACK_NPM_REGISTRY \
-    --mount=type=secret,id=NPM_CONFIG_REGISTRY,env=NPM_CONFIG_REGISTRY \
-    --mount=type=secret,id=npm_config_registry,env=npm_config_registry \
-    --mount=type=secret,id=PNPM_CONFIG_REGISTRY,env=PNPM_CONFIG_REGISTRY \
-    --mount=type=secret,id=pnpm_config_registry,env=pnpm_config_registry \
-    CI=true pnpm --dir adminui install --frozen-lockfile --config.shared-workspace-lockfile=false --config.confirmModulesPurge=false \
+RUN --mount=type=secret,id=COREPACK_NPM_REGISTRY \
+    --mount=type=secret,id=NPM_CONFIG_REGISTRY \
+    --mount=type=secret,id=npm_config_registry \
+    --mount=type=secret,id=PNPM_CONFIG_REGISTRY \
+    --mount=type=secret,id=pnpm_config_registry \
+    for registry_secret in \
+      COREPACK_NPM_REGISTRY \
+      NPM_CONFIG_REGISTRY \
+      npm_config_registry \
+      PNPM_CONFIG_REGISTRY \
+      pnpm_config_registry; do \
+      if [ -s "/run/secrets/${registry_secret}" ]; then \
+        export "${registry_secret}=$(cat "/run/secrets/${registry_secret}")"; \
+      fi; \
+    done \
+    && CI=true pnpm --dir adminui install --frozen-lockfile --config.shared-workspace-lockfile=false --config.confirmModulesPurge=false \
     && pnpm --dir adminui build
 
 FROM ${BASE_BUILDER_IMAGE} AS builder

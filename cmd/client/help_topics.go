@@ -4,7 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"runtime"
 	"slices"
 	"strings"
@@ -27,7 +27,7 @@ func availableHelpTopics() []string {
 		if entry.IsDir() {
 			continue
 		}
-		topics = append(topics, strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())))
+		topics = append(topics, strings.TrimSuffix(entry.Name(), path.Ext(entry.Name())))
 	}
 	slices.Sort(topics)
 	return topics
@@ -79,11 +79,16 @@ func loadHelpTopic(name string) (string, bool) {
 	if strings.TrimSpace(name) == "" {
 		return "", false
 	}
-	data, err := embeddedHelpTopics.ReadFile(filepath.Join("help_topics", name+".txt"))
+	data, err := embeddedHelpTopics.ReadFile(embeddedHelpTopicPath(name))
 	if err != nil {
 		return "", false
 	}
 	return renderHelpTopicForOS(string(data), runtime.GOOS), true
+}
+
+// embed.FS paths always use forward slashes, including on Windows.
+func embeddedHelpTopicPath(name string) string {
+	return path.Join("help_topics", name+".txt")
 }
 
 func renderHelpTopicForOS(body string, goos string) string {

@@ -7,6 +7,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestEmbeddedHelpTopicPathUsesEmbedFSSeparators(t *testing.T) {
+	t.Parallel()
+
+	topicPath := embeddedHelpTopicPath("quickstart")
+	require.Equal(t, "help_topics/quickstart.txt", topicPath)
+	require.NotContains(t, topicPath, "\\")
+
+	_, err := embeddedHelpTopics.ReadFile(`help_topics\quickstart.txt`)
+	require.Error(t, err)
+
+	_, err = embeddedHelpTopics.ReadFile(topicPath)
+	require.NoError(t, err)
+}
+
 func TestHelpTopicsUseRuntimesCommandSurface(t *testing.T) {
 	t.Parallel()
 

@@ -5,6 +5,7 @@
 ```bash
 DOCKER_BUILDKIT=1 docker build \
   --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+  --build-arg PNPM_PACKAGE_MANAGER="$(sed -n 's/^[[:space:]]*"packageManager"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$(git rev-parse --show-toplevel)/package.json")" \
   --build-arg GOPROXY=https://proxy.golang.org \
   -t tunnel-client:latest \
   -f Dockerfile .

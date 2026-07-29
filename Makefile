@@ -10,6 +10,8 @@ ADMIN_UI_DIR := adminui
 ADMIN_UI_ASSETS_DIR := pkg/adminui/assets
 ADMIN_UI_BUILD_SCRIPT := scripts/build_admin_ui.sh
 PNPM       ?= pnpm
+PNPM_PACKAGE_MANAGER_MANIFEST ?= $(or $(wildcard package.json),$(shell git rev-parse --show-toplevel 2>/dev/null)/package.json)
+PNPM_PACKAGE_MANAGER ?= $(shell sed -n 's/^[[:space:]]*"packageManager"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$(PNPM_PACKAGE_MANAGER_MANIFEST)")
 ADMIN_UI_PNPM_FLAGS := --config.shared-workspace-lockfile=false --config.confirmModulesPurge=false
 ADMIN_UI_PNPM_STORE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/tunnel-client-adminui-pnpm-store
 GOPROXY ?= https://proxy.golang.org
@@ -132,7 +134,7 @@ IMAGE_NAME    := openai/tunnel-client
 IMAGE_TAG     := $(if $(GIT_SHA),$(GIT_SHA),latest)
 
 build-image: $(TARGET)
-	docker build --build-arg GIT_SHA=$(IMAGE_TAG) --build-arg GOPROXY=$(GOPROXY) -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker build --build-arg GIT_SHA=$(IMAGE_TAG) --build-arg GOPROXY=$(GOPROXY) --build-arg PNPM_PACKAGE_MANAGER="$(PNPM_PACKAGE_MANAGER)" -t $(IMAGE_NAME):$(IMAGE_TAG) .
 	@if [ "$(GIT_SHA)" != "" ]; then \
 		docker tag $(IMAGE_NAME):$(IMAGE_TAG) $(IMAGE_NAME):latest; \
 	fi

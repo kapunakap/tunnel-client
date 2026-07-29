@@ -8,6 +8,7 @@ ARG PROJECT_ROOT=.
 
 FROM ${BASE_UI_BUILDER_IMAGE} AS ui-builder
 ARG PROJECT_ROOT=.
+ARG PNPM_PACKAGE_MANAGER
 WORKDIR /repo
 RUN --mount=type=bind,source=.,target=/context,ro \
     --mount=type=secret,id=COREPACK_NPM_REGISTRY \
@@ -26,7 +27,7 @@ RUN --mount=type=bind,source=.,target=/context,ro \
       fi; \
     done \
     && corepack enable pnpm \
-    && corepack prepare "$(node -p 'require(`/context/${process.env.PROJECT_ROOT || "."}/adminui/package.json`).packageManager')" --activate
+    && corepack prepare "${PNPM_PACKAGE_MANAGER:-$(node -p 'require("/context/package.json").packageManager')}" --activate
 COPY ${PROJECT_ROOT}/adminui/package.json ./adminui/
 COPY ${PROJECT_ROOT}/adminui/pnpm-lock.yaml ./adminui/
 COPY ${PROJECT_ROOT}/adminui/pnpm-workspace.yaml ./adminui/

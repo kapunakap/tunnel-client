@@ -209,18 +209,24 @@ For the full surface (flags, defaults, advanced knobs), see [`configuration.md`]
 - Custom MCP request headers configured on the app are forwarded through the
   OpenAI tunnel service, except
   internal auth and IP-forwarding transport headers.
-- OAuth discovery GETs are forwarded to the tunnel-client; discovery payloads and
-  `WWW-Authenticate resource_metadata` are rewritten to OpenAI tunnel-service
-  URLs for the same `tunnel_id`.
+- Protected-resource OAuth discovery GETs are forwarded to the tunnel-client;
+  discovery payloads and `WWW-Authenticate resource_metadata` are rewritten to
+  OpenAI tunnel-service URLs for the same `tunnel_id`.
 - `authorization_servers[0]` from PRMD is the only source of truth and metadata
   fetch target for auth-server metadata enrichment and Harpoon OAuth target
   registration.
 - Auth-server metadata is accepted even when metadata `issuer` differs from
   `authorization_servers[0]` (external IdP issuer topologies are supported), and
   mismatch diagnostics are retained.
-- The authorization server itself is not tunneled. If it is only reachable
-  on-prem or behind a firewall and not accessible from the internet or the
-  tunnel-client host, the OAuth flow can fail.
+- Registered `harpoon://` `registration_endpoint`, `token_endpoint`, and
+  `revocation_endpoint` values are rewritten to Tunnel OAuth-shim routes.
+  Their POST requests and responses traverse Tunnel and Harpoon; public
+  `http(s)` endpoint URLs remain unchanged and are called by the product OAuth
+  caller rather than through Tunnel.
+- The OAuth shim does not rewrite `authorization_endpoint`; the supported
+  auto-registered path leaves browser authorization direct to the upstream
+  authorization server. Tunnel does not expose arbitrary authorization-server
+  routes.
 
 ## 5) Run
 

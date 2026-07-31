@@ -124,9 +124,9 @@ inside the customer network:
   use the configured `main` MCP endpoint (`/v1/mcp/{tunnel_id}` for a
   tunnel-backed connector). The connector bearer is forwarded only on that
   customer MCP path, not on the internal `harpoon` channel.
-- OAuth discovery is represented as a tunnel command and executed by
-  `tunnel-client`, using the MCP server URL and the same outbound proxy/CA trust
-  as other MCP HTTP traffic.
+- Protected-resource OAuth discovery is represented as a tunnel command and
+  executed by `tunnel-client`, using the MCP server URL and the same outbound
+  proxy/CA trust as other MCP HTTP traffic.
 - `authorization_servers[0]` from Protected Resource Metadata is the source of
   truth for auth-server metadata enrichment and Harpoon OAuth target
   registration.
@@ -134,9 +134,10 @@ inside the customer network:
   `authorization_servers[0]` is accepted for external enterprise IdP setups;
   the mismatch is preserved in logs and admin state for diagnostics.
 
-The authorization server is not automatically tunneled. It must be reachable by
-both the product OAuth flow and the tunnel-client host when discovery or
-metadata enrichment requires it.
+The authorization server is not generically tunneled. Registered Harpoon
+targets can carry known registration, token, and revocation POST endpoints, but
+the supported auto-registered path leaves browser authorization direct and any
+unshimmed public endpoint must be reachable by the actor that calls it.
 
 ## Environment variables contributors commonly miss
 

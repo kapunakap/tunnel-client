@@ -112,9 +112,60 @@ flowchart TB
   class proxy,ca,mtls option
 ```
 
+Choosing **Connection: Tunnel** changes how an OpenAI product reaches the MCP
+server; it does not make MCP authentication or MCP data flow fully local. A
+custom app that uses Tunnel keeps the MCP listener private, but its requests,
+responses, and applicable auth artifacts still follow the paths below.
+
+### Auth and data flow matrix
+
+| Flow or artifact | Current path | Customer-local part |
+| --- | --- | --- |
+| MCP JSON-RPC requests, tool arguments, responses, and stream events | Cross the OpenAI product runtime, tunnel-service queue, and the tunnel client's control-plane connection. | Only the final tunnel-client-to-MCP hop is local. |
+| Connector-forwarded `Authorization` | Crosses OpenAI with the queued request headers. For HTTP MCP, tunnel-client applies it to the outgoing MCP request; stdio has no HTTP-header hop. OpenAI-internal, IP-forwarding, and hop-by-hop auth headers are blocked. | A forwarded bearer token is not local-only. |
+| Tunnel runtime API key (`CONTROL_PLANE_API_KEY`) | Sent from tunnel-client to OpenAI as bearer auth for poll, response, and metadata control-plane calls; it is not forwarded to the MCP server. | The key can be sourced and stored locally, but it does not remain local. |
+| OAuth discovery; DCR, token, and revocation | Connector-facing protected-resource metadata uses the tunnel/Harpoon path. Authorization-server metadata does so only when its issuer was rewritten to a Harpoon-backed route; registered `harpoon://` DCR, token, and revocation endpoints do as well. Their requests and responses cross OpenAI. Public `http(s)` OAuth endpoints remain unchanged and are called by the product OAuth caller rather than through Tunnel. | For registered targets, the final Harpoon call originates inside the customer network. |
+| Browser authorization | The OAuth shim does not rewrite `authorization_endpoint`; the supported auto-registered path leaves the browser to contact the upstream authorization server directly. | The browser-to-authorization-server hop is direct. |
+| OAuth callback and authorization-code exchange | The callback target is selected by the product/app OAuth flow. In the OpenAI connector flow, OpenAI receives and processes the callback/code and performs the token exchange; a shimmed token endpoint changes only the final hop. Client credentials, refresh tokens, and token responses remain in that product OAuth path when present. | For a shimmed token endpoint, the final tunnel-client/Harpoon-to-authorization-server hop is local. |
+| Env- or file-backed `MCP_EXTRA_HEADERS` | For HTTP MCP, values are resolved by tunnel-client and injected only for the configured MCP server origin: the exact MCP path for runtime requests, and the same origin for discovery/probe requests. This mechanism does not send them to the OpenAI control plane or unrelated auth-server hosts; connector-forwarded headers apply last and can override them. | A static HTTP backend credential can stay on the tunnel-client-to-MCP hop. Stdio has no HTTP-header injection. |
+| MCP-side mTLS | Applies only to `http-streamable` MCP. The private key stays local and the client certificate is presented only to the configured MCP origin; it is not control-plane auth. | The TLS handshake is on the HTTP tunnel-client-to-MCP hop. Stdio has no TLS hop, and non-HTTP binding mTLS is rejected. |
+
+### Choosing the right path
+
+- **Strict-local-auth is not supported by Tunnel.** If every bearer token or
+  auth artifact must stay outside OpenAI, do not use Secure MCP Tunnel for that
+  requirement.
+- **Local credential injection and MCP-side mTLS are narrower supported
+  cases.** For HTTP MCP, use env- or file-backed `MCP_EXTRA_HEADERS` when a
+  static backend credential must be added only on the final MCP hop, or
+  MCP-side mTLS when the private key must stay customer-side. MCP payloads and
+  results still traverse OpenAI.
+- `MCP_EXTRA_HEADERS` is static configuration; it is not dynamic,
+  short-lived, per-request token generation.
+- **For Codex, use a direct local MCP configuration instead of Tunnel** when
+  strict-local-auth is required: stdio, loopback HTTP, or private HTTP that is
+  reachable from the Codex host. Do not configure raw
+  `/v1/mcp/{tunnel_id}` as a Codex MCP URL. Tool content still enters the
+  normal Codex/model data path. See the
+  [Codex MCP documentation](https://developers.openai.com/codex/extend/mcp).
+
+### Security-review triage
+
+Before deciding whether Tunnel fits a customer's requirement, ask:
+
+- Which target surface is involved: ChatGPT, a custom app, API, AgentKit, or
+  Codex?
+- Which auth mode is in use: no auth, forwarded bearer, OAuth, static header,
+  or mTLS?
+- Which specific artifacts are prohibited from crossing OpenAI: tool payloads,
+  bearer tokens, authorization codes, refresh tokens, client secrets, private
+  keys, or all of them?
+- Is a local loopback proxy allowed?
+
 Security-relevant defaults:
 
-- The tunnel path requires the tunnel client's control-plane API key.
+- Tunnel-client control-plane calls require the tunnel client's runtime API key;
+  this key is separate from MCP-server authentication.
 - The MCP server does not need a public listener.
 - The admin UI and log endpoints are loopback-only by default unless
   `--allow-remote-ui` is enabled.
@@ -206,8 +257,8 @@ the standard MCP OAuth flow while keeping the MCP server private:
 
 - Inbound `Authorization` headers are forwarded to the MCP server through the
   tunnel client.
-- OAuth discovery GETs are queued as tunnel commands and executed from the
-  customer's network by the tunnel client.
+- Connector-facing protected-resource discovery GETs are queued as tunnel
+  commands and executed from the customer's network by the tunnel client.
 - `WWW-Authenticate` `resource_metadata` values and discovery payload `resource`
   URLs are rewritten to OpenAI tunnel-service endpoints for the same
   `tunnel_id`.
@@ -217,6 +268,12 @@ the standard MCP OAuth flow while keeping the MCP server private:
 - Metadata is accepted when the returned `issuer` differs from
   `authorization_servers[0]`, which supports external enterprise identity
   provider issuer URLs while preserving mismatch diagnostics in logs and state.
-- The authorization server itself is not tunneled. If the authorization server
-  is unreachable from the public internet and from the tunnel-client host, the
-  OAuth flow can fail.
+- Registered `harpoon://` `registration_endpoint`, `token_endpoint`, and
+  `revocation_endpoint` values are rewritten to Tunnel OAuth-shim routes.
+  Their POST requests and responses traverse Tunnel and Harpoon; public
+  `http(s)` endpoint URLs remain unchanged and are called by the product OAuth
+  caller rather than through Tunnel.
+- The OAuth shim does not rewrite `authorization_endpoint`; the supported
+  auto-registered path leaves browser authorization direct to the upstream
+  authorization server. Tunnel does not expose arbitrary authorization-server
+  routes.

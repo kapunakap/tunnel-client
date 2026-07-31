@@ -453,7 +453,8 @@ routing, streaming, OAuth discovery, and common setup pitfalls, see
   - Scope: applies to all `http-streamable` MCP channels unless a
     channel-qualified `--mcp.server-url` entry provides its own `client-cert` +
     `client-key`.
-  - Note: stdio channels ignore mTLS settings.
+  - Note: mTLS applies only to `http-streamable`; stdio has no TLS hop and
+    channel-qualified mTLS on a non-HTTP binding is rejected.
 - **Static MCP headers (optional)**
   - Flag (repeatable): `--mcp.extra-headers "Key: Value"`
   - Env: `MCP_EXTRA_HEADERS="Key: Value, Key2: Value2"`
@@ -480,8 +481,8 @@ routing, streaming, OAuth discovery, and common setup pitfalls, see
 
 **OAuth-protected MCP notes:**
 
-- Forwards inbound `Authorization` headers and discovery GETs through the
-  tunnel client. Discovery payload `resource` values and
+- Forwards inbound `Authorization` headers and protected-resource discovery
+  GETs through the tunnel client. Discovery payload `resource` values and
   `WWW-Authenticate resource_metadata` values are rewritten to tunnel-service
   URLs for the same `tunnel_id`.
 - Uses `authorization_servers[0]` from PRMD as the source of truth and metadata
@@ -490,9 +491,15 @@ routing, streaming, OAuth discovery, and common setup pitfalls, see
 - Accepts auth-server metadata even when metadata `issuer` differs from
   `authorization_servers[0]` (external IdP issuers are supported). Mismatch
   details are preserved in diagnostics and logs.
-- The authorization server is not tunneled. If it is only reachable on-premises
-  or behind a firewall, and not accessible from the internet or the
-  tunnel-client host, the OAuth flow can fail.
+- Registered `harpoon://` `registration_endpoint`, `token_endpoint`, and
+  `revocation_endpoint` values are rewritten to Tunnel OAuth-shim routes.
+  Their POST requests and responses traverse Tunnel and Harpoon; public
+  `http(s)` endpoint URLs remain unchanged and are called by the product OAuth
+  caller rather than through Tunnel.
+- The OAuth shim does not rewrite `authorization_endpoint`; the supported
+  auto-registered path leaves browser authorization direct to the upstream
+  authorization server. Tunnel does not expose arbitrary authorization-server
+  routes.
 
 ## Channels
 

@@ -25,9 +25,10 @@ func TestOpenAPIContractSurface(t *testing.T) {
 
 	paths := mustMap(t, spec["paths"], "paths")
 	expected := map[string]string{
-		"/v1/tunnels/{tunnel_id}":          "get",
-		"/v1/tunnels/{tunnel_id}/poll":     "get",
-		"/v1/tunnels/{tunnel_id}/response": "post",
+		"/v1/tunnels/{tunnel_id}":                    "get",
+		"/v1/tunnels/{tunnel_id}/cloudflare/runtime": "get",
+		"/v1/tunnels/{tunnel_id}/poll":               "get",
+		"/v1/tunnels/{tunnel_id}/response":           "post",
 	}
 	if len(paths) != len(expected) {
 		t.Fatalf("expected only %d public paths, got %d", len(expected), len(paths))
@@ -43,8 +44,23 @@ func TestOpenAPIContractSurface(t *testing.T) {
 	}
 
 	assertOperationID(t, spec, "/v1/tunnels/{tunnel_id}", "get", "getTunnelMetadata")
+	assertOperationID(t, spec, "/v1/tunnels/{tunnel_id}/cloudflare/runtime", "get", "getCloudflareRuntime")
 	assertOperationID(t, spec, "/v1/tunnels/{tunnel_id}/poll", "get", "pollTunnelCommands")
 	assertOperationID(t, spec, "/v1/tunnels/{tunnel_id}/response", "post", "postTunnelResponse")
+	runtime := operation(t, spec, "/v1/tunnels/{tunnel_id}/cloudflare/runtime", "get")
+	runtimeResponses := mustMap(t, runtime["responses"], "runtime.responses")
+	for _, statusCode := range []string{"200", "400", "401", "404", "500", "503"} {
+		if _, ok := runtimeResponses[statusCode]; !ok {
+			t.Fatalf("runtime operation must document %s", statusCode)
+		}
+	}
+	runtimeSuccess := mustMap(t, runtimeResponses["200"], "runtime.responses.200")
+	runtimeHeaders := mustMap(t, runtimeSuccess["headers"], "runtime.responses.200.headers")
+	for _, headerName := range []string{"Cache-Control", "Pragma"} {
+		if _, ok := runtimeHeaders[headerName]; !ok {
+			t.Fatalf("runtime success response must document %s", headerName)
+		}
+	}
 
 	poll := operation(t, spec, "/v1/tunnels/{tunnel_id}/poll", "get")
 	responses := mustMap(t, poll["responses"], "poll.responses")
@@ -78,6 +94,37 @@ func TestOpenAPIContractSurface(t *testing.T) {
 
 	components := mustMap(t, spec["components"], "components")
 	componentSchemas := mustMap(t, components["schemas"], "components.schemas")
+	runtimeResponse := mustMap(
+		t,
+		componentSchemas["ManagedCloudflareRuntimeResponse"],
+		"components.schemas.ManagedCloudflareRuntimeResponse",
+	)
+	runtimeProperties := mustMap(
+		t,
+		runtimeResponse["properties"],
+		"ManagedCloudflareRuntimeResponse.properties",
+	)
+	runtimeToken := mustMap(
+		t,
+		runtimeProperties["runtime_token"],
+		"ManagedCloudflareRuntimeResponse.runtime_token",
+	)
+	if got := mustString(t, runtimeToken["format"], "runtime_token.format"); got != "password" {
+		t.Fatalf("runtime token format = %q, want password", got)
+	}
+	if _, ok := runtimeToken["writeOnly"]; ok {
+		t.Fatal("runtime token is returned by this GET response and must not be writeOnly")
+	}
+	requiredRuntimeFields := stringSlice(
+		t,
+		runtimeResponse["required"],
+		"ManagedCloudflareRuntimeResponse.required",
+	)
+	for _, requiredField := range []string{"cloudflare_tunnel", "runtime_token"} {
+		if !hasString(requiredRuntimeFields, requiredField) {
+			t.Fatalf("managed Cloudflare runtime response must require %q", requiredField)
+		}
+	}
 	for _, schemaName := range []string{"JsonRpcPolledCommand", "SessionTerminationPolledCommand"} {
 		command := mustMap(t, componentSchemas[schemaName], "components.schemas."+schemaName)
 		properties := mustMap(t, command["properties"], schemaName+".properties")
@@ -759,4 +806,13 @@ func mapKeys(value map[string]any) []string {
 		}
 	}
 	return keys
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Secure MCP Tunnel client control-plane API",
-    "description": "Language-independent HTTP and JSON contract implemented by Secure MCP Tunnel clients. This document intentionally contains only the client-facing metadata, long-poll, and response endpoints.",
+    "description": "Language-independent HTTP and JSON contract implemented by Secure MCP Tunnel clients. This document intentionally contains only the client-facing metadata, managed Cloudflare runtime fetch, long-poll, and response endpoints.",
     "version": "0.0.1"
   },
   "servers": [
@@ -88,6 +88,181 @@
             "x-tunnel-error-codes": [
               "rate_limit_exceeded"
             ],
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/tunnels/{tunnel_id}/cloudflare/runtime": {
+      "get": {
+        "summary": "Fetch managed Cloudflare runtime material for a tunnel client",
+        "description": "Fetch managed Cloudflare provider metadata and the runtime token for an explicitly enabled bundled cloudflared companion. This endpoint requires a non-admin secret runtime API key with api.organization.tunnel.use, and the same currently attached organization or workspace principal must pass a fresh per-tunnel use check. Treat the entire response as secret-bearing and never persist, cache, or log it.",
+        "operationId": "getCloudflareRuntime",
+        "parameters": [
+          {
+            "name": "tunnel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Opaque tunnel identifier.",
+              "title": "Tunnel Id"
+            },
+            "description": "Opaque tunnel identifier."
+          },
+          {
+            "name": "X-Tunnel-Client-Name",
+            "in": "header",
+            "required": false,
+            "description": "Stable client implementation name for diagnostics.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Tunnel-Client-Version",
+            "in": "header",
+            "required": false,
+            "description": "Client implementation version for diagnostics.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedCloudflareRuntimeResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of this secret-bearing response.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Pragma": {
+                "description": "Legacy no-cache hint for this secret-bearing response.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tunnel-service error response (400). Stable codes: `invalid_tunnel_id_format`. Code details and mitigations are documented in the APIErrorBody.code schema.",
+            "x-tunnel-error-codes": [
+              "invalid_tunnel_id_format"
+            ],
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Tunnel-service error response (401). Stable codes: `tunnel_active_organization_required`, `tunnel_missing_principals`, `tunnel_use_forbidden`. Code details and mitigations are documented in the APIErrorBody.code schema.",
+            "x-tunnel-error-codes": [
+              "tunnel_active_organization_required",
+              "tunnel_missing_principals",
+              "tunnel_use_forbidden"
+            ],
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The logical tunnel has no managed Cloudflare runtime material.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of this secret-bearing response.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Pragma": {
+                "description": "Legacy no-cache hint for this secret-bearing response.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Tunnel-service error response (429). Stable codes: `rate_limit_exceeded`. Code details and mitigations are documented in the APIErrorBody.code schema.",
+            "x-tunnel-error-codes": [
+              "rate_limit_exceeded"
+            ],
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Managed Cloudflare runtime material could not be loaded or decrypted.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of this secret-bearing response.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Pragma": {
+                "description": "Legacy no-cache hint for this secret-bearing response.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Tunnel runtime surface is temporarily unavailable; optional Retry-After.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -509,6 +684,26 @@
         ],
         "title": "APIErrorResponse"
       },
+      "ManagedCloudflareRuntimeResponse": {
+        "properties": {
+          "cloudflare_tunnel": {
+            "$ref": "#/components/schemas/CloudflareTunnelResponse",
+            "description": "Non-secret metadata for the managed Cloudflare tunnel."
+          },
+          "runtime_token": {
+            "type": "string",
+            "format": "password",
+            "title": "Runtime Token",
+            "description": "Managed Cloudflare runtime token for cloudflared."
+          }
+        },
+        "type": "object",
+        "required": [
+          "cloudflare_tunnel",
+          "runtime_token"
+        ],
+        "title": "ManagedCloudflareRuntimeResponse"
+      },
       "PolledCommandList": {
         "properties": {
           "commands": {
@@ -840,6 +1035,44 @@
           "type"
         ],
         "title": "APIErrorBody"
+      },
+      "CloudflareTunnelResponse": {
+        "properties": {
+          "tunnel_id": {
+            "type": "string",
+            "title": "Tunnel Id",
+            "description": "Cloudflare tunnel identifier"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Deterministic managed Cloudflare tunnel name"
+          },
+          "account_id": {
+            "type": "string",
+            "title": "Account Id",
+            "description": "Configured Cloudflare account identifier"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At",
+            "description": "Cloudflare creation timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tunnel_id",
+          "name",
+          "account_id"
+        ],
+        "title": "CloudflareTunnelResponse"
       },
       "JsonRpcPolledCommand": {
         "properties": {

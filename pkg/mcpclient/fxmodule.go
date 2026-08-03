@@ -283,6 +283,14 @@ func buildMcpHTTPTransport(logger *slog.Logger, loggingCfg *config.LoggingConfig
 	//   2. Forwarding injects per-request connector headers last so they win conflicts.
 	//   3. Logging wraps otel instrumentation so raw dumps include final headers.
 	//   4. otelhttp instrumentation and its route labeler sit close to the network to record final calls.
+	extraHeaders, err := config.NormalizeExtraHeaders("MCP extra headers", extraHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("mcpclient: %w", err)
+	}
+	discoveryExtraHeaders, err = config.NormalizeExtraHeaders("MCP discovery extra headers", discoveryExtraHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("mcpclient: %w", err)
+	}
 	base, err := tctransport.CloneDefaultWithBundle(tlsBundle)
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: %w", err)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -152,7 +151,18 @@ func loadFileConfigValues(fs *pflag.FlagSet, lookupEnv func(string) (string, boo
 		return nil, err
 	}
 
-	env, err := cfg.toEnv(lookupEnv)
+	selectedCfg := cfg
+	if configValueOverridden(fs, lookupEnv, "control-plane.extra-headers", "CONTROL_PLANE_EXTRA_HEADERS") {
+		selectedCfg.ControlPlane.ExtraHeaders = nil
+	}
+	if configValueOverridden(fs, lookupEnv, "mcp.extra-headers", "MCP_EXTRA_HEADERS") {
+		selectedCfg.MCP.ExtraHeaders = nil
+	}
+	if configValueOverridden(fs, lookupEnv, "mcp.discovery-extra-headers", "MCP_DISCOVERY_EXTRA_HEADERS") {
+		selectedCfg.MCP.DiscoveryExtraHeaders = nil
+	}
+
+	env, err := selectedCfg.toEnv(lookupEnv)
 	if err != nil {
 		return nil, fmt.Errorf("parse config file %s: %w", source.Path, err)
 	}
@@ -166,6 +176,14 @@ func loadFileConfigValues(fs *pflag.FlagSet, lookupEnv func(string) (string, boo
 		Env:              env,
 		CloudflaredToken: cfg.Cloudflared.Token,
 	}, nil
+}
+
+func configValueOverridden(fs *pflag.FlagSet, lookupEnv func(string) (string, bool), flagName, envName string) bool {
+	if flag := fs.Lookup(flagName); flag != nil && flag.Changed {
+		return true
+	}
+	_, set := lookupEnv(envName)
+	return set
 }
 
 func parseFileConfig(path string, data []byte) (fileConfig, error) {
@@ -222,7 +240,11 @@ func (c fileConfig) toEnv(lookupEnv func(string) (string, bool)) (map[string]str
 		env["CONTROL_PLANE_API_KEY"] = apiKey
 	}
 	if len(c.ControlPlane.ExtraHeaders) > 0 {
-		env["CONTROL_PLANE_EXTRA_HEADERS"] = joinHeaderMap(c.ControlPlane.ExtraHeaders)
+		extraHeaders, err := encodeExtraHeaderMap("control_plane.extra_headers", c.ControlPlane.ExtraHeaders)
+		if err != nil {
+			return nil, err
+		}
+		env["CONTROL_PLANE_EXTRA_HEADERS"] = extraHeaders
 	}
 
 	setString(env, "LOG_LEVEL", c.Log.Level)
@@ -262,10 +284,18 @@ func (c fileConfig) toEnv(lookupEnv func(string) (string, bool)) (map[string]str
 	setString(env, "MCP_CLIENT_CERT", c.MCP.ClientCert)
 	setString(env, "MCP_CLIENT_KEY", c.MCP.ClientKey)
 	if len(c.MCP.ExtraHeaders) > 0 {
-		env["MCP_EXTRA_HEADERS"] = joinHeaderMap(c.MCP.ExtraHeaders)
+		extraHeaders, err := encodeExtraHeaderMap("mcp.extra_headers", c.MCP.ExtraHeaders)
+		if err != nil {
+			return nil, err
+		}
+		env["MCP_EXTRA_HEADERS"] = extraHeaders
 	}
 	if len(c.MCP.DiscoveryExtraHeaders) > 0 {
-		env["MCP_DISCOVERY_EXTRA_HEADERS"] = joinHeaderMap(c.MCP.DiscoveryExtraHeaders)
+		discoveryExtraHeaders, err := encodeExtraHeaderMap("mcp.discovery_extra_headers", c.MCP.DiscoveryExtraHeaders)
+		if err != nil {
+			return nil, err
+		}
+		env["MCP_DISCOVERY_EXTRA_HEADERS"] = discoveryExtraHeaders
 	}
 	setString(env, "MCP_CONNECTION_MAX_TTL", c.MCP.ConnectionMaxTTL)
 	setInt(env, "MCP_MAX_CONCURRENT_REQUESTS", c.MCP.MaxConcurrentRequests)
@@ -372,19 +402,6 @@ func resolveConfigValueReference(source string, raw string, lookupEnv func(strin
 	default:
 		return raw, nil
 	}
-}
-
-func joinHeaderMap(headers map[string]string) string {
-	keys := make([]string, 0, len(headers))
-	for key := range headers {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	entries := make([]string, 0, len(keys))
-	for _, key := range keys {
-		entries = append(entries, key+": "+headers[key])
-	}
-	return strings.Join(entries, ";")
 }
 
 func formatMCPServerURLEntries(entries []fileMCPServerURL) ([]string, error) {

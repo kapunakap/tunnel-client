@@ -66,6 +66,39 @@ func TestNewValidatesRequiredInputs(t *testing.T) {
 			wantErr:   "cannot override authentication or client metadata",
 		},
 		{
+			name: "conflicting case-variant control plane headers",
+			cfg: tunnelclient.Config{
+				TunnelID: testTunnelID,
+				APIKey:   testAPIKey,
+				ControlPlaneExtraHeaders: map[string]string{
+					"X-Proxy-Auth": "first",
+					"x-proxy-auth": "second",
+				},
+			},
+			transport: clientTransport,
+			wantErr:   "conflicting values for case-insensitive HTTP header",
+		},
+		{
+			name: "invalid control plane header name",
+			cfg: tunnelclient.Config{
+				TunnelID:                 testTunnelID,
+				APIKey:                   testAPIKey,
+				ControlPlaneExtraHeaders: map[string]string{"Bad Header": "value"},
+			},
+			transport: clientTransport,
+			wantErr:   "invalid HTTP header name",
+		},
+		{
+			name: "invalid control plane header value",
+			cfg: tunnelclient.Config{
+				TunnelID:                 testTunnelID,
+				APIKey:                   testAPIKey,
+				ControlPlaneExtraHeaders: map[string]string{"X-Test": "bad\x00value"},
+			},
+			transport: clientTransport,
+			wantErr:   "invalid HTTP header value",
+		},
+		{
 			name: "max in-flight requests",
 			cfg: tunnelclient.Config{
 				TunnelID:            testTunnelID,

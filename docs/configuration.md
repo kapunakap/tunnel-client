@@ -332,6 +332,9 @@ tunnel-client profiles add corp-proxy --sample sample_mcp_enterprise_proxy --tun
   - YAML: `control_plane.extra_headers`
   - Header values accept `env:VARNAME` and `file:/path/to/secret`; all other
     values are treated literally.
+  - Header names must use valid HTTP field-name syntax and are
+    case-insensitive. Identical case variants collapse to one header;
+    conflicting values and invalid wire values are rejected before startup.
   - Reserved control-plane headers (`Authorization`, `Accept`, `User-Agent`,
     `X-Tunnel-Client-Name`, `X-Tunnel-Client-Version`, and
     `X-Tunnel-Client-Instance-Id`) are managed by the client and cannot be
@@ -461,6 +464,9 @@ routing, streaming, OAuth discovery, and common setup pitfalls, see
   - YAML: `mcp.extra_headers`
   - Header values accept `env:VARNAME` and `file:/path/to/secret`; all other
     values are treated literally.
+  - Header names must use valid HTTP field-name syntax and are
+    case-insensitive. Identical case variants collapse to one header;
+    conflicting values and invalid wire values are rejected before startup.
   - Scope: sent only to the configured MCP server origin for outbound MCP HTTP
     traffic. These headers are not sent to the OpenAI control plane or
     unrelated authorization-server hosts.
@@ -472,6 +478,8 @@ routing, streaming, OAuth discovery, and common setup pitfalls, see
   - YAML: `mcp.discovery_extra_headers`
   - Header values accept `env:VARNAME` and `file:/path/to/secret`; all other
     values are treated literally.
+  - Header names and values follow the same validation and case-insensitive
+    conflict rules as static MCP headers.
   - Scope: sent only to MCP discovery/probe requests for the configured MCP
     server origin, including OAuth Protected Resource Metadata discovery,
     WWW-Authenticate probing, and the startup MCP initialize probe.

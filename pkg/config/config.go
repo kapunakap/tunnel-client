@@ -1124,6 +1124,9 @@ func buildExtraHeaders(fs *pflag.FlagSet, lookupEnv func(string) (string, bool),
 		}
 		raw = append(raw, values...)
 	} else if envVal, ok := lookupEnv(envName); ok && envVal != "" {
+		if strings.HasPrefix(envVal, encodedExtraHeaderMapPrefix) {
+			return decodeExtraHeaderMap(flagName, envVal, lookupEnv)
+		}
 		raw = splitHeaderList(envVal)
 	}
 
@@ -1165,26 +1168,26 @@ func parseHeaderList(values []string, lookupEnv func(string) (string, bool), sou
 		val = resolvedVal
 		headers[key] = val
 	}
-	return headers, nil
+	return NormalizeExtraHeaders(source, headers)
 }
 
 func parseHeader(raw string) (string, string, error) {
 	parts := strings.SplitN(raw, ":", 2)
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid header %q: expected 'Key: Value'", raw)
+		return "", "", errors.New("invalid header: expected 'Key: Value'")
 	}
 
 	key := strings.TrimSpace(parts[0])
 	value := strings.TrimSpace(parts[1])
 
 	if key == "" {
-		return "", "", fmt.Errorf("invalid header %q: key cannot be empty", raw)
+		return "", "", errors.New("invalid header: key cannot be empty")
 	}
 	if value == "" {
-		return "", "", fmt.Errorf("invalid header %q: value cannot be empty", raw)
+		return "", "", fmt.Errorf("invalid header value for %q: value cannot be empty", key)
 	}
 	if strings.ContainsAny(value, "\r\n") {
-		return "", "", fmt.Errorf("invalid header %q: value cannot contain CR or LF", raw)
+		return "", "", fmt.Errorf("invalid header value for %q: value cannot contain CR or LF", key)
 	}
 
 	return key, value, nil

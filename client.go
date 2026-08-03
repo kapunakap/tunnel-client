@@ -58,7 +58,8 @@ type Config struct {
 	ControlPlaneURLPath string
 	OrganizationID      string
 	// ControlPlaneExtraHeaders adds non-authentication headers to poll,
-	// response, and metadata requests.
+	// response, and metadata requests. Names and values must be valid for HTTP;
+	// names are case-insensitive, and conflicting case variants are rejected.
 	ControlPlaneExtraHeaders map[string]string
 
 	// MaxInFlightRequests controls the bounded control-plane command queue.
@@ -300,7 +301,11 @@ func buildConfig(cfg Config) (*config.Config, error) {
 	if cfg.PollDeadlineGuardrail < 0 {
 		return nil, errors.New("tunnel-client: poll deadline guardrail must be greater than zero")
 	}
-	if err := validateControlPlaneExtraHeaders(cfg.ControlPlaneExtraHeaders); err != nil {
+	extraHeaders, err := config.NormalizeExtraHeaders("tunnel-client: control-plane extra headers", cfg.ControlPlaneExtraHeaders)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateControlPlaneExtraHeaders(extraHeaders); err != nil {
 		return nil, err
 	}
 
@@ -314,7 +319,7 @@ func buildConfig(cfg Config) (*config.Config, error) {
 			MaxInFlightRequests:   maxInFlight,
 			PollTimeout:           cfg.PollTimeout,
 			PollDeadlineGuardrail: cfg.PollDeadlineGuardrail,
-			ExtraHeaders:          cloneHeaders(cfg.ControlPlaneExtraHeaders),
+			ExtraHeaders:          extraHeaders,
 		},
 		Logging: config.LoggingConfig{
 			Level:  cfg.LogLevel,
@@ -330,17 +335,6 @@ func buildConfig(cfg Config) (*config.Config, error) {
 			}},
 		},
 	}, nil
-}
-
-func cloneHeaders(headers map[string]string) map[string]string {
-	if len(headers) == 0 {
-		return nil
-	}
-	cloned := make(map[string]string, len(headers))
-	for name, value := range headers {
-		cloned[name] = value
-	}
-	return cloned
 }
 
 func validateControlPlaneExtraHeaders(headers map[string]string) error {

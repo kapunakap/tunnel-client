@@ -682,6 +682,156 @@ proxy:
 	}
 }
 
+func TestLoadRejectsInvalidYAMLExtraHeadersBeforeSerialization(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		configYAML string
+		wantErr    string
+	}{
+		{
+			name: "delimiter in control-plane header name",
+			configYAML: `
+control_plane:
+  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  api_key: env:YAML_CONTROL_PLANE_API_KEY
+  extra_headers:
+    "Bad:Header": value
+mcp:
+  server_urls:
+    - channel: main
+      url: https://yaml-mcp.example/mcp
+`,
+			wantErr: `invalid HTTP header name "Bad:Header"`,
+		},
+		{
+			name: "conflicting MCP header case variants",
+			configYAML: `
+control_plane:
+  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  api_key: env:YAML_CONTROL_PLANE_API_KEY
+mcp:
+  server_urls:
+    - channel: main
+      url: https://yaml-mcp.example/mcp
+  extra_headers:
+    X-Proxy-Auth: first
+    x-proxy-auth: second
+`,
+			wantErr: "conflicting values for case-insensitive HTTP header",
+		},
+		{
+			name: "invalid MCP discovery header value",
+			configYAML: `
+control_plane:
+  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  api_key: env:YAML_CONTROL_PLANE_API_KEY
+mcp:
+  server_urls:
+    - channel: main
+      url: https://yaml-mcp.example/mcp
+  discovery_extra_headers:
+    X-Test: "bad\0value"
+`,
+			wantErr: "invalid HTTP header value",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			configPath := writeTempConfigFile(t, tc.configYAML)
+			_, err := Load([]string{"--config", configPath}, lookupEnvMap(map[string]string{
+				"YAML_CONTROL_PLANE_API_KEY": "yaml-control-key",
+			}))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q error, got %v", tc.wantErr, err)
+			}
+			if strings.Contains(err.Error(), "bad\x00value") {
+				t.Fatalf("error exposed rejected header value: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadHigherPrecedenceExtraHeadersOverrideInvalidYAML(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeTempConfigFile(t, `
+control_plane:
+  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  api_key: env:YAML_CONTROL_PLANE_API_KEY
+  extra_headers:
+    "Bad:Header": value
+mcp:
+  server_urls:
+    - channel: main
+      url: https://yaml-mcp.example/mcp
+  extra_headers:
+    X-Proxy-Auth: first
+    x-proxy-auth: second
+  discovery_extra_headers:
+    X-Test: "bad\0value"
+`)
+
+	cfg, err := Load([]string{
+		"--config", configPath,
+		"--control-plane.extra-headers", "X-Control: flag",
+		"--mcp.discovery-extra-headers", "X-Discovery: flag",
+	}, lookupEnvMap(map[string]string{
+		"YAML_CONTROL_PLANE_API_KEY": "yaml-control-key",
+		"MCP_EXTRA_HEADERS":          "X-MCP: environment",
+	}))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ControlPlane.ExtraHeaders["X-Control"] != "flag" {
+		t.Fatalf("expected flag control-plane headers, got %#v", cfg.ControlPlane.ExtraHeaders)
+	}
+	if cfg.MCP.ExtraHeaders["X-Mcp"] != "environment" {
+		t.Fatalf("expected environment MCP headers, got %#v", cfg.MCP.ExtraHeaders)
+	}
+	if cfg.MCP.DiscoveryExtraHeaders["X-Discovery"] != "flag" {
+		t.Fatalf("expected flag discovery headers, got %#v", cfg.MCP.DiscoveryExtraHeaders)
+	}
+}
+
+func TestLoadPreservesYAMLExtraHeaderDelimiters(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeTempConfigFile(t, `
+control_plane:
+  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  api_key: env:YAML_CONTROL_PLANE_API_KEY
+  extra_headers:
+    X-Composite: "first; second, third"
+mcp:
+  server_urls:
+    - channel: main
+      url: https://yaml-mcp.example/mcp
+  extra_headers:
+    Cookie: "a=1; b=2"
+  discovery_extra_headers:
+    X-List: "one,two;three"
+`)
+
+	cfg, err := Load([]string{"--config", configPath}, lookupEnvMap(map[string]string{
+		"YAML_CONTROL_PLANE_API_KEY": "yaml-control-key",
+	}))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ControlPlane.ExtraHeaders["X-Composite"] != "first; second, third" || len(cfg.ControlPlane.ExtraHeaders) != 1 {
+		t.Fatalf("control-plane header value was split or changed: %#v", cfg.ControlPlane.ExtraHeaders)
+	}
+	if cfg.MCP.ExtraHeaders["Cookie"] != "a=1; b=2" || len(cfg.MCP.ExtraHeaders) != 1 {
+		t.Fatalf("MCP header value was split or changed: %#v", cfg.MCP.ExtraHeaders)
+	}
+	if cfg.MCP.DiscoveryExtraHeaders["X-List"] != "one,two;three" || len(cfg.MCP.DiscoveryExtraHeaders) != 1 {
+		t.Fatalf("discovery header value was split or changed: %#v", cfg.MCP.DiscoveryExtraHeaders)
+	}
+}
+
 func TestLoadPrecedenceFlagsEnvYAMLDefaults(t *testing.T) {
 	configPath := writeTempConfigFile(t, `
 control_plane:
@@ -2373,16 +2523,25 @@ func TestParseHeader(t *testing.T) {
 func TestParseHeaderRejectsInvalid(t *testing.T) {
 	t.Parallel()
 
-	for _, input := range []string{
-		"no-colon",
-		": missing-key",
-		"Missing-value:   ",
+	for _, tc := range []struct {
+		name        string
+		input       string
+		doNotExpose string
+	}{
+		{name: "missing colon", input: "no-colon", doNotExpose: "no-colon"},
+		{name: "missing key", input: ": secret-value", doNotExpose: "secret-value"},
+		{name: "missing value", input: "Missing-value:   "},
+		{name: "line break", input: "X-Auth: secret-value\ncontinuation", doNotExpose: "secret-value"},
 	} {
-		input := input
-		t.Run(input, func(t *testing.T) {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, _, err := parseHeader(input); err == nil {
-				t.Fatalf("expected error parsing %q, got nil", input)
+			_, _, err := parseHeader(tc.input)
+			if err == nil {
+				t.Fatalf("expected error parsing %q, got nil", tc.input)
+			}
+			if tc.doNotExpose != "" && strings.Contains(err.Error(), tc.doNotExpose) {
+				t.Fatalf("error exposed rejected header value: %v", err)
 			}
 		})
 	}
@@ -2408,14 +2567,14 @@ func TestBuildControlPlaneExtraHeadersFromEnv(t *testing.T) {
 	if len(headers) != 3 {
 		t.Fatalf("expected 3 headers, got %d", len(headers))
 	}
-	if headers["extra-header"] != "true" {
-		t.Fatalf("expected extra-header=true, got %q", headers["extra-header"])
+	if headers["Extra-Header"] != "true" {
+		t.Fatalf("expected Extra-Header=true, got %q", headers["Extra-Header"])
 	}
-	if headers["x-debug"] != "1" {
-		t.Fatalf("expected x-debug=1, got %q", headers["x-debug"])
+	if headers["X-Debug"] != "1" {
+		t.Fatalf("expected X-Debug=1, got %q", headers["X-Debug"])
 	}
-	if headers["another-header"] != "value" {
-		t.Fatalf("expected another-header=value, got %q", headers["another-header"])
+	if headers["Another-Header"] != "value" {
+		t.Fatalf("expected Another-Header=value, got %q", headers["Another-Header"])
 	}
 }
 
@@ -2439,8 +2598,8 @@ func TestBuildControlPlaneExtraHeadersFromFlags(t *testing.T) {
 	if len(headers) != 2 {
 		t.Fatalf("expected 2 headers, got %d", len(headers))
 	}
-	if headers["extra-header"] != "true" {
-		t.Fatalf("expected extra-header=true, got %q", headers["extra-header"])
+	if headers["Extra-Header"] != "true" {
+		t.Fatalf("expected Extra-Header=true, got %q", headers["Extra-Header"])
 	}
 	if headers["X-Trace-Id"] != "abc123" {
 		t.Fatalf("expected X-Trace-Id=abc123, got %q", headers["X-Trace-Id"])
@@ -2517,6 +2676,139 @@ func TestBuildControlPlaneExtraHeadersRejectsReservedHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildExtraHeadersNormalizesOrRejectsCaseVariantNames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("identical values collapse", func(t *testing.T) {
+		t.Parallel()
+
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		RegisterFlags(fs)
+		if err := fs.Parse([]string{
+			`--control-plane.extra-headers`, `X-Proxy-Auth: same`,
+			`--control-plane.extra-headers`, `x-proxy-auth: same`,
+		}); err != nil {
+			t.Fatalf("flag parse failed: %v", err)
+		}
+
+		headers, err := buildExtraHeaders(fs, func(string) (string, bool) { return "", false }, "control-plane.extra-headers", "CONTROL_PLANE_EXTRA_HEADERS")
+		if err != nil {
+			t.Fatalf("buildExtraHeaders returned error: %v", err)
+		}
+		if len(headers) != 1 || headers["X-Proxy-Auth"] != "same" {
+			t.Fatalf("expected one canonical header, got %#v", headers)
+		}
+	})
+
+	t.Run("conflicting values fail", func(t *testing.T) {
+		t.Parallel()
+
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		RegisterFlags(fs)
+		if err := fs.Parse([]string{
+			`--control-plane.extra-headers`, `X-Proxy-Auth: first`,
+			`--control-plane.extra-headers`, `x-proxy-auth: second`,
+		}); err != nil {
+			t.Fatalf("flag parse failed: %v", err)
+		}
+
+		_, err := buildExtraHeaders(fs, func(string) (string, bool) { return "", false }, "control-plane.extra-headers", "CONTROL_PLANE_EXTRA_HEADERS")
+		if err == nil || !strings.Contains(err.Error(), "conflicting values for case-insensitive HTTP header") {
+			t.Fatalf("expected conflicting header error, got %v", err)
+		}
+	})
+
+	t.Run("exact duplicate keeps last value", func(t *testing.T) {
+		t.Parallel()
+
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		RegisterFlags(fs)
+		if err := fs.Parse([]string{
+			`--control-plane.extra-headers`, `X-Proxy-Auth: first`,
+			`--control-plane.extra-headers`, `X-Proxy-Auth: second`,
+		}); err != nil {
+			t.Fatalf("flag parse failed: %v", err)
+		}
+
+		headers, err := buildExtraHeaders(fs, func(string) (string, bool) { return "", false }, "control-plane.extra-headers", "CONTROL_PLANE_EXTRA_HEADERS")
+		if err != nil {
+			t.Fatalf("buildExtraHeaders returned error: %v", err)
+		}
+		if len(headers) != 1 || headers["X-Proxy-Auth"] != "second" {
+			t.Fatalf("expected last exact duplicate value, got %#v", headers)
+		}
+	})
+}
+
+func TestBuildExtraHeadersRejectsInvalidHTTPSyntax(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		header  string
+		wantErr string
+	}{
+		{name: "invalid name", header: "Bad Header: value", wantErr: "invalid HTTP header name"},
+		{name: "invalid value", header: "X-Test: bad\vvalue", wantErr: "invalid HTTP header value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+			RegisterFlags(fs)
+			if err := fs.Parse([]string{`--control-plane.extra-headers`, tc.header}); err != nil {
+				t.Fatalf("flag parse failed: %v", err)
+			}
+
+			_, err := buildExtraHeaders(fs, func(string) (string, bool) { return "", false }, "control-plane.extra-headers", "CONTROL_PLANE_EXTRA_HEADERS")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q error, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestBuildExtraHeadersRejectsInvalidResolvedValues(t *testing.T) {
+	t.Parallel()
+
+	t.Run("environment value", func(t *testing.T) {
+		t.Parallel()
+
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		RegisterFlags(fs)
+		if err := fs.Parse([]string{`--control-plane.extra-headers`, `X-Test: env:HEADER_VALUE`}); err != nil {
+			t.Fatalf("flag parse failed: %v", err)
+		}
+
+		_, err := buildExtraHeaders(fs, lookupEnvMap(map[string]string{"HEADER_VALUE": "bad\x7fvalue"}), "control-plane.extra-headers", "CONTROL_PLANE_EXTRA_HEADERS")
+		if err == nil || !strings.Contains(err.Error(), "invalid HTTP header value") {
+			t.Fatalf("expected invalid resolved environment value error, got %v", err)
+		}
+		if strings.Contains(err.Error(), "bad") {
+			t.Fatalf("error exposed rejected environment value: %v", err)
+		}
+	})
+
+	t.Run("file value", func(t *testing.T) {
+		t.Parallel()
+
+		headerFile := writeTempSecretFile(t, "bad\x00value")
+		fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+		RegisterFlags(fs)
+		if err := fs.Parse([]string{`--control-plane.extra-headers`, `X-Test: file:` + headerFile}); err != nil {
+			t.Fatalf("flag parse failed: %v", err)
+		}
+
+		_, err := buildExtraHeaders(fs, func(string) (string, bool) { return "", false }, "control-plane.extra-headers", "CONTROL_PLANE_EXTRA_HEADERS")
+		if err == nil || !strings.Contains(err.Error(), "invalid HTTP header value") {
+			t.Fatalf("expected invalid resolved file value error, got %v", err)
+		}
+		if strings.Contains(err.Error(), "bad") {
+			t.Fatalf("error exposed rejected file value: %v", err)
+		}
+	})
+}
+
 func TestValidateFileConfigSyntaxRejectsReservedControlPlaneExtraHeaders(t *testing.T) {
 	t.Parallel()
 
@@ -2532,6 +2824,48 @@ func TestValidateFileConfigSyntaxRejectsReservedControlPlaneExtraHeaders(t *test
 	}
 	if !strings.Contains(err.Error(), "cannot override control-plane authentication") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateFileConfigSyntaxRejectsInvalidOrConflictingExtraHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		cfg     fileConfig
+		wantErr string
+	}{
+		{
+			name: "control plane case variants",
+			cfg: fileConfig{ControlPlane: fileControlPlaneConfig{ExtraHeaders: map[string]string{
+				"X-Proxy-Auth": "first",
+				"x-proxy-auth": "second",
+			}}},
+			wantErr: "conflicting values for case-insensitive HTTP header",
+		},
+		{
+			name: "MCP runtime invalid name",
+			cfg: fileConfig{MCP: fileMCPConfig{ExtraHeaders: map[string]string{
+				"Bad Header": "value",
+			}}},
+			wantErr: "invalid HTTP header name",
+		},
+		{
+			name: "MCP discovery invalid value",
+			cfg: fileConfig{MCP: fileMCPConfig{DiscoveryExtraHeaders: map[string]string{
+				"X-Test": "bad\x00value",
+			}}},
+			wantErr: "invalid HTTP header value",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateFileConfigSyntax(tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q error, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 

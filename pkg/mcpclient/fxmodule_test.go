@@ -163,6 +163,56 @@ func TestNewMcpClient_LoggingTransportRequiresDebugLevel(t *testing.T) {
 	}
 }
 
+func TestBuildMcpHTTPTransportRejectsInvalidExtraHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name             string
+		extraHeaders     map[string]string
+		discoveryHeaders map[string]string
+		wantErr          string
+	}{
+		{
+			name: "runtime conflict",
+			extraHeaders: map[string]string{
+				"X-Proxy-Auth": "first",
+				"x-proxy-auth": "second",
+			},
+			wantErr: "conflicting values for case-insensitive HTTP header",
+		},
+		{
+			name: "discovery conflict",
+			discoveryHeaders: map[string]string{
+				"X-Proxy-Auth": "first",
+				"x-proxy-auth": "second",
+			},
+			wantErr: "conflicting values for case-insensitive HTTP header",
+		},
+		{name: "runtime invalid name", extraHeaders: map[string]string{"Bad Header": "value"}, wantErr: "invalid HTTP header name"},
+		{name: "discovery invalid value", discoveryHeaders: map[string]string{"X-Test": "bad\x00value"}, wantErr: "invalid HTTP header value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := buildMcpHTTPTransport(
+				slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+				&config.LoggingConfig{},
+				sdkmetric.NewMeterProvider(),
+				nil,
+				nil,
+				"",
+				nil,
+				mustParseURL(t, "https://example.invalid/mcp"),
+				tc.extraHeaders,
+				tc.discoveryHeaders,
+			)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q error, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestChannelHTTPClientScopesStaticAndForwardedAuthorizationHeaders(t *testing.T) {
 	t.Parallel()
 

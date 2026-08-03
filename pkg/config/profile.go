@@ -367,11 +367,11 @@ func stringPtr(value string) *string {
 }
 
 func validateHeaderReferenceSyntax(source string, headers map[string]string) error {
+	if _, err := NormalizeExtraHeaders(source, headers); err != nil {
+		return err
+	}
 	for key, value := range headers {
 		headerSource := source + "." + key
-		if strings.TrimSpace(key) == "" {
-			return fmt.Errorf("%s key cannot be empty", source)
-		}
 		if err := validateHeaderValueReferenceSyntax(headerSource, value); err != nil {
 			return err
 		}

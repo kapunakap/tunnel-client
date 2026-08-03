@@ -1189,6 +1189,39 @@ func TestTunnelServiceClientExtraHeadersAreSent(t *testing.T) {
 	assert.NoError(t, err, "Poll should succeed with extra headers enabled")
 }
 
+func TestNewTunnelServiceClientRejectsInvalidExtraHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+		wantErr string
+	}{
+		{
+			name: "conflicting case variants",
+			headers: map[string]string{
+				"X-Proxy-Auth": "first",
+				"x-proxy-auth": "second",
+			},
+			wantErr: "conflicting values for case-insensitive HTTP header",
+		},
+		{name: "invalid name", headers: map[string]string{"Bad Header": "value"}, wantErr: "invalid HTTP header name"},
+		{name: "invalid value", headers: map[string]string{"X-Test": "bad\x00value"}, wantErr: "invalid HTTP header value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := NewTunnelServiceClient(context.Background(), &config.ControlPlaneConfig{
+				BaseURL:      mustParseURL(t, "http://127.0.0.1:1"),
+				TunnelID:     types.TunnelID("cli-tunnel"),
+				APIKey:       "test-api-key",
+				ExtraHeaders: tc.headers,
+			}, nil, newDiscardLogger(), &config.LoggingConfig{}, testMeterProvider)
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
 type warnCaptureHandler struct {
 	seenOverride bool
 	header       string

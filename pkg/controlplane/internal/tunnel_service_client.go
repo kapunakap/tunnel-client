@@ -262,6 +262,10 @@ func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *t
 	//   3. otelhttp instrumentation and its route labeler sit close to the network for accurate metrics.
 	//   4. Response receipt recording sits closest to the network so outer response
 	//      middleware cannot delay the timestamp by consuming the response body.
+	extraHeaders, err := config.NormalizeExtraHeaders("controlplane client extra headers", cfg.ExtraHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("controlplane client: %w", err)
+	}
 	base, err := tctransport.CloneDefaultWithBundle(tlsBundle)
 	if err != nil {
 		return nil, fmt.Errorf("controlplane client: %w", err)
@@ -295,7 +299,7 @@ func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *t
 		cfg.APIKey,
 		version.UserAgent,
 		cfg.OrganizationID,
-		cfg.ExtraHeaders,
+		extraHeaders,
 		logger,
 	), nil
 }

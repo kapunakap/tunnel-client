@@ -37,9 +37,10 @@ type fetcherParams struct {
 type clientResult struct {
 	fx.Out
 
-	Fetcher   controlplane.Fetcher
-	Responder controlplane.Responder
-	Client    *internal.TunnelServiceClient
+	Fetcher                        controlplane.Fetcher
+	Responder                      controlplane.Responder
+	ManagedCloudflareTunnelFetcher controlplane.ManagedCloudflareTunnelFetcher
+	Client                         *internal.TunnelServiceClient
 }
 
 func newTunnelServiceClient(p fetcherParams) (clientResult, error) {
@@ -58,9 +59,10 @@ func newTunnelServiceClient(p fetcherParams) (clientResult, error) {
 	logger.InfoContext(context.Background(), "control-plane route resolved", logFields...)
 
 	return clientResult{
-		Fetcher:   client,
-		Responder: client,
-		Client:    client,
+		Fetcher:                        client,
+		Responder:                      client,
+		ManagedCloudflareTunnelFetcher: client,
+		Client:                         client,
 	}, nil
 }
 

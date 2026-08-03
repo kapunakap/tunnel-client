@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.uber.org/fx"
@@ -93,13 +94,26 @@ func cloudflaredStartTimeout(cfg *config.Config) time.Duration {
 		return fx.DefaultTimeout
 	}
 
+	timeout := addStartupTimeout(fx.DefaultTimeout, cfg.Cloudflared.ReadyTimeout)
+	// Managed mode fetches the runtime token before cloudflared starts. Give
+	// that request its full configured control-plane deadline so a slow fetch
+	// cannot consume the subsequent cloudflared readiness budget. A static
+	// token wins and never needs this additional allowance.
+	if cfg.Cloudflared.Managed && strings.TrimSpace(cfg.Cloudflared.Token) == "" {
+		timeout = addStartupTimeout(timeout, cfg.ControlPlane.PollDeadlineTimeoutOrDefault())
+	}
+	return timeout
+}
+
+func addStartupTimeout(base, extra time.Duration) time.Duration {
 	const maxDuration = time.Duration(1<<63 - 1)
-	if cfg.Cloudflared.ReadyTimeout > maxDuration-fx.DefaultTimeout {
+	if extra <= 0 {
+		return base
+	}
+	if base >= maxDuration-extra {
 		return maxDuration
 	}
-	// Keep Fx's normal startup allowance for the rest of the app in addition
-	// to the cloudflared-specific readiness budget.
-	return fx.DefaultTimeout + cfg.Cloudflared.ReadyTimeout
+	return base + extra
 }
 
 // New constructs a tunnel-client Fx app using the shared wiring plus any extra options.

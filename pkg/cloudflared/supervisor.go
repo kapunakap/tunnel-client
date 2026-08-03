@@ -20,6 +20,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/controlplane"
 	tclog "github.com/openai/tunnel-client/pkg/log"
 )
 
@@ -42,9 +43,10 @@ var Module = fx.Module(
 // Supervisor owns one bundled cloudflared process for the lifetime of the
 // tunnel-client runtime.
 type Supervisor struct {
-	cfg    *config.CloudflaredConfig
-	state  *State
-	logger *slog.Logger
+	cfg     *config.CloudflaredConfig
+	state   *State
+	logger  *slog.Logger
+	fetcher controlplane.ManagedCloudflareTunnelFetcher
 
 	mu            sync.Mutex
 	cmd           *exec.Cmd
@@ -61,9 +63,10 @@ type Supervisor struct {
 type supervisorParams struct {
 	fx.In
 
-	Config *config.CloudflaredConfig
-	State  *State
-	Logger *slog.Logger
+	Config                *config.CloudflaredConfig
+	State                 *State
+	Logger                *slog.Logger
+	ManagedRuntimeFetcher controlplane.ManagedCloudflareTunnelFetcher `optional:"true"`
 }
 
 // NewSupervisor constructs the optional child-process supervisor.
@@ -81,6 +84,7 @@ func NewSupervisor(p supervisorParams) (*Supervisor, error) {
 		cfg:        p.Config,
 		state:      p.State,
 		logger:     p.Logger.With(slog.String(tclog.FieldComponent, tclog.ComponentCloudflared)),
+		fetcher:    p.ManagedRuntimeFetcher,
 		failures:   make(chan error, 1),
 		newCommand: exec.Command,
 	}, nil
@@ -119,6 +123,12 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
+	token, err := s.runtimeToken(ctx)
+	if err != nil {
+		s.state.setNotReady("cloudflared managed runtime fetch failed")
+		return err
+	}
+
 	path, err := resolveExecutablePath(s.cfg.Path)
 	if err != nil {
 		s.state.setNotReady(err.Error())
@@ -132,7 +142,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 
 	cmd := s.newCommand(path, "tunnel", "--no-autoupdate", "--metrics", metricsAddr, "run")
 	configureChildProcess(cmd)
-	cmd.Env = cloudflaredEnvironment(os.Environ(), s.cfg.Token)
+	cmd.Env = cloudflaredEnvironment(os.Environ(), token)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("cloudflared: stdout pipe: %w", err)
@@ -172,8 +182,8 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		slog.String("version", BundledVersion()),
 		slog.String("metrics_addr", metricsAddr),
 	)
-	go s.consumeOutput(stdout, "stdout")
-	go s.consumeOutput(stderr, "stderr")
+	go s.consumeOutput(stdout, "stdout", token)
+	go s.consumeOutput(stderr, "stderr", token)
 	go s.waitForExit()
 
 	readyCtx, cancel := context.WithTimeout(ctx, s.cfg.ReadyTimeout)
@@ -195,6 +205,32 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Unlock()
 	go s.monitorReadiness(monitorCtx)
 	return nil
+}
+
+func (s *Supervisor) runtimeToken(ctx context.Context) (string, error) {
+	if s == nil || s.cfg == nil {
+		return "", errors.New("cloudflared: config is required")
+	}
+	if strings.TrimSpace(s.cfg.Token) != "" {
+		return s.cfg.Token, nil
+	}
+	if !s.cfg.Managed {
+		return "", nil
+	}
+	if s.fetcher == nil {
+		return "", errors.New("cloudflared: managed runtime fetcher is unavailable")
+	}
+
+	runtime, err := s.fetcher.FetchManagedCloudflareTunnel(ctx)
+	if err != nil {
+		// Fetcher errors may come from arbitrary transports. Keep the startup
+		// error token-safe instead of formatting or chaining it.
+		return "", errors.New("cloudflared: fetch managed runtime credentials failed")
+	}
+	if runtime == nil || strings.TrimSpace(runtime.RuntimeToken) == "" {
+		return "", errors.New("cloudflared: managed runtime token is unavailable")
+	}
+	return runtime.RuntimeToken, nil
 }
 
 // Stop gracefully terminates the child, then kills it if it does not exit
@@ -353,14 +389,14 @@ func (s *Supervisor) waitForExit() {
 	}
 }
 
-func (s *Supervisor) consumeOutput(reader io.Reader, stream string) {
+func (s *Supervisor) consumeOutput(reader io.Reader, stream, token string) {
 	if reader == nil {
 		return
 	}
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
-		message := redactToken(scanner.Text(), s.cfg.Token)
+		message := redactToken(scanner.Text(), token)
 		s.logger.Info("cloudflared output", slog.String("stream", stream), slog.String("message", message))
 	}
 	if err := scanner.Err(); err != nil {

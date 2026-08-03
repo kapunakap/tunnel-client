@@ -74,6 +74,24 @@ tunnel-client run \
 override; supported release archives discover the adjacent bundled executable
 without it.
 
+## Run with a tunnel-service managed token
+
+For a logical tunnel created with managed Cloudflare provisioning, enable the
+authenticated runtime fetch instead of distributing a static token:
+
+```bash
+tunnel-client run \
+  --cloudflared.managed \
+  --control-plane.tunnel-id tunnel_0123456789abcdef0123456789abcdef \
+  --mcp.server-url https://mcp.example.com/mcp
+```
+
+The client uses `CONTROL_PLANE_API_KEY` and the configured organization context
+to call `GET /v1/tunnels/{tunnel_id}/cloudflare/runtime`, validates the
+returned metadata and token, and keeps the token in memory only. A configured
+static `--cloudflared.token` or `CLOUDFLARED_TUNNEL_TOKEN` takes precedence
+and bypasses this fetch.
+
 Inspect the reviewed pin without starting a child process:
 
 ```bash
@@ -104,18 +122,20 @@ different metrics listener or network policy.
 
 ## Lifecycle and readiness
 
-When a token is configured, `tunnel-client run`:
+When a static token is configured or managed fetch is enabled, `tunnel-client run`:
 
-1. launches bundled `cloudflared tunnel --no-autoupdate ... run`;
-2. passes the token only through the child `TUNNEL_TOKEN` environment variable;
-3. waits up to `--cloudflared.ready-timeout` (default `30s`) for the
+1. fetches the managed runtime token first when requested and no static token is configured;
+2. launches bundled `cloudflared tunnel --no-autoupdate ... run`;
+3. passes the token only through the child `TUNNEL_TOKEN` environment variable;
+4. waits up to `--cloudflared.ready-timeout` (default `30s`) for the
    loopback `cloudflared` `/ready` endpoint to report an active connection;
-4. keeps `/readyz` unavailable when the companion later loses readiness; and
-5. stops the child on normal shutdown or exits nonzero when the child exits
+5. keeps `/readyz` unavailable when the companion later loses readiness; and
+6. stops the child on normal shutdown or exits nonzero when the child exits
    unexpectedly.
 
-The child output is redacted before it enters tunnel-client logs. The token is
-also redacted from support exports and effective config snapshots.
+The managed fetch bypasses raw HTTP body logging. Child output is redacted
+before it enters tunnel-client logs. The token is also redacted from support
+exports and effective config snapshots.
 
 ## Pin, provenance, and security updates
 

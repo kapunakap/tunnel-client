@@ -141,7 +141,9 @@ Use two different keys:
   key and select Tunnels **Read** + **Use**. Do not use **All** or an admin key
   for the long-lived daemon. The key's principal still needs Tunnels **Read** +
   **Use** for the target tunnel. It can also read one known tunnel through
-  `tunnel-client admin tunnels get <tunnel_id>`.
+  `tunnel-client admin tunnels get <tunnel_id>`. The same per-tunnel **Use**
+  authorization gates managed Cloudflare runtime-token fetch when
+  `cloudflared.managed` is enabled.
 - `OPENAI_ADMIN_KEY`: admin key used only for
   `tunnel-client admin tunnels list|create|update|delete`. Do not put this key
   in the long-lived daemon config.

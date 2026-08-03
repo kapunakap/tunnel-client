@@ -21,6 +21,7 @@ func TestControlPlaneEndpointsMatchOpenAPIContract(t *testing.T) {
 		method     string
 	}{
 		{name: "metadata", pathFormat: metadataPathFormat, method: http.MethodGet},
+		{name: "managed_cloudflare_runtime", pathFormat: managedCloudflarePathFormat, method: http.MethodGet},
 		{name: "poll", pathFormat: pollPathFormat, method: http.MethodGet},
 		{name: "response", pathFormat: responsePathFormat, method: http.MethodPost},
 	}

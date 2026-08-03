@@ -33,7 +33,8 @@
 //     disappears.
 //   - Structured logging that avoids dumping bodies by default; raw payload
 //     logs are only enabled when LOG_HTTP_RAW_UNSAFE or the corresponding flag
-//     is true.
+//     is true. Managed Cloudflare runtime-token fetches always bypass raw body
+//     logging even when that unsafe debug mode is enabled.
 //   - Metric and trace hooks so the rest of the client can emit poll/response
 //     counters, latency histograms, and OpenTelemetry spans aligned with the
 //     control-plane contract.

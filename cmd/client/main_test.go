@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -311,6 +313,152 @@ func TestAppBindsHealthBeforeCloudflaredReadiness(t *testing.T) {
 	stopped = true
 }
 
+func TestAppManagedCloudflaredFetchesRuntimeAndBecomesReady(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a Unix executable wrapper")
+	}
+
+	tempDir := t.TempDir()
+	healthURLPath := filepath.Join(tempDir, "health_url")
+	readyGatePath := filepath.Join(tempDir, "cloudflared-ready")
+	cloudflaredPath := filepath.Join(tempDir, "cloudflared")
+	wrapper := "#!/bin/sh\nexec " + shellSingleQuote(os.Args[0]) + " -test.run=TestDelayedCloudflaredHelper -- \"$@\"\n"
+	require.NoError(t, os.WriteFile(cloudflaredPath, []byte(wrapper), 0o700))
+	t.Setenv("GO_WANT_DELAYED_CLOUDFLARED_HELPER", "1")
+	t.Setenv("DELAYED_CLOUDFLARED_READY_GATE", readyGatePath)
+	const runtimeToken = "managed-runtime-secret-token"
+	runtimeTokenDigest := sha256.Sum256([]byte(runtimeToken))
+	t.Setenv("DELAYED_CLOUDFLARED_EXPECT_TOKEN_SHA256", fmt.Sprintf("%x", runtimeTokenDigest))
+
+	tunnelID := types.TunnelID("tunnel_0123456789abcdef0123456789abcdef")
+	runtimeRequest := make(chan struct{}, 1)
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/tunnels/" + url.PathEscape(tunnelID.String()):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"` + tunnelID.String() + `","name":"test tunnel","description":"test fixture"}`))
+		case "/v1/tunnels/" + url.PathEscape(tunnelID.String()) + "/cloudflare/runtime":
+			if r.Header.Get("Authorization") != "Bearer test-api-key" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			select {
+			case runtimeRequest <- struct{}{}:
+			default:
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"cloudflare_tunnel": map[string]any{
+					"tunnel_id":  "provider-tunnel-id",
+					"name":       "provider-tunnel-name",
+					"account_id": "provider-account-id",
+				},
+				"runtime_token": runtimeToken,
+			})
+		case "/v1/tunnels/" + url.PathEscape(tunnelID.String()) + "/poll":
+			w.WriteHeader(http.StatusNoContent)
+		case "/v1/tunnels/" + url.PathEscape(tunnelID.String()) + "/response":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(controlPlane.Close)
+
+	cfg := &config.Config{
+		ControlPlane: config.ControlPlaneConfig{
+			BaseURL:               mustParseURL(t, controlPlane.URL),
+			TunnelID:              tunnelID,
+			APIKey:                "test-api-key",
+			MaxInFlightRequests:   1,
+			PollTimeout:           100 * time.Millisecond,
+			PollDeadlineGuardrail: 100 * time.Millisecond,
+		},
+		Logging: config.LoggingConfig{
+			Level: slog.LevelInfo,
+		},
+		Health: config.HealthConfig{
+			ListenAddr: "127.0.0.1:0",
+			URLFile:    healthURLPath,
+		},
+		Cloudflared: config.CloudflaredConfig{
+			Managed:      true,
+			Path:         cloudflaredPath,
+			ReadyTimeout: 10 * time.Second,
+		},
+		MCP: config.MCPConfig{
+			TransportKind:         config.MCPTransportStdio,
+			Command:               "cat",
+			CommandArgs:           []string{"cat"},
+			ConnectionMaxTTL:      time.Minute,
+			MaxConcurrentRequests: 10,
+		},
+	}
+
+	fxApp := fx.New(app.Options(
+		cfg,
+		fx.StopTimeout(5*time.Second),
+		fx.NopLogger,
+	)...)
+	require.Equal(t, 25*time.Second+200*time.Millisecond, fxApp.StartTimeout())
+
+	startCtx, startCancel := context.WithTimeout(context.Background(), fxApp.StartTimeout())
+	startErr := make(chan error, 1)
+	startDone := make(chan struct{})
+	go func() {
+		defer close(startDone)
+		startErr <- fxApp.Start(startCtx)
+	}()
+
+	stopped := false
+	t.Cleanup(func() {
+		if stopped {
+			return
+		}
+		_ = os.WriteFile(readyGatePath, []byte("ready"), 0o600)
+		startCancel()
+		select {
+		case <-startDone:
+		case <-time.After(5 * time.Second):
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = fxApp.Stop(stopCtx)
+	})
+
+	select {
+	case <-runtimeRequest:
+	case <-time.After(5 * time.Second):
+		t.Fatal("managed cloudflared runtime fetch did not reach control plane")
+	}
+	require.Empty(t, cfg.Cloudflared.Token, "managed runtime token must not persist in config")
+
+	select {
+	case err := <-startErr:
+		t.Fatalf("app start returned before cloudflared readiness gate: %v", err)
+	default:
+	}
+
+	require.NoError(t, os.WriteFile(readyGatePath, []byte("ready"), 0o600))
+	select {
+	case err := <-startErr:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("app did not finish starting after managed cloudflared became ready")
+	}
+
+	data, err := os.ReadFile(healthURLPath)
+	require.NoError(t, err)
+	baseURL := strings.TrimSpace(string(data))
+	require.NoError(t, waitForReady(&http.Client{Timeout: 2 * time.Second}, baseURL, 5*time.Second))
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	require.NoError(t, fxApp.Stop(stopCtx))
+	startCancel()
+	stopped = true
+}
+
 func TestDelayedCloudflaredHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_DELAYED_CLOUDFLARED_HELPER") != "1" {
 		return
@@ -320,6 +468,13 @@ func TestDelayedCloudflaredHelper(t *testing.T) {
 	if metricsAddr == "" {
 		_, _ = fmt.Fprintln(os.Stderr, "missing --metrics")
 		os.Exit(2)
+	}
+	if expectedTokenDigest := os.Getenv("DELAYED_CLOUDFLARED_EXPECT_TOKEN_SHA256"); expectedTokenDigest != "" {
+		actualTokenDigest := sha256.Sum256([]byte(os.Getenv("TUNNEL_TOKEN")))
+		if fmt.Sprintf("%x", actualTokenDigest) != expectedTokenDigest {
+			_, _ = fmt.Fprintln(os.Stderr, "unexpected tunnel token")
+			os.Exit(2)
+		}
 	}
 
 	signals := make(chan os.Signal, 1)

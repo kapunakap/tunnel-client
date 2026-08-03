@@ -132,7 +132,10 @@ admin_ui:
 process:
   pid_file: /run/tunnel-client/tunnel-client.pid
 cloudflared:
-  # Optional. Use an env: or file: reference; literal tokens are rejected.
+  # Optional. Fetch the managed runtime token from tunnel-service on startup.
+  managed: true
+  # Optional static override. Use an env: or file: reference; literal tokens are rejected.
+  # When present, this takes precedence over managed fetch.
   token: env:CLOUDFLARED_TOKEN
   # Optional source-build/test override. Release archives discover the sibling binary.
   path: /opt/tunnel-client/cloudflared
@@ -173,11 +176,15 @@ supported for control-plane, MCP runtime, and MCP discovery/probe extra
 headers. The `env:` and `file:` prefixes are reserved for these references;
 all other values are treated literally.
 
-`cloudflared.token` is stricter: it accepts only `env:VARNAME` or
-`file:/path/to/secret`, and `CLOUDFLARED_TUNNEL_TOKEN` is the direct environment
-equivalent. When configured, `tunnel-client run` starts the adjacent bundled
-`cloudflared`, passes the token only through the child environment, waits for
-its loopback readiness endpoint, and propagates unexpected process exits.
+`cloudflared.managed` (or `CLOUDFLARED_MANAGED`) asks `tunnel-client run`
+to fetch the managed Cloudflare metadata and runtime token from the authenticated
+control plane before starting the adjacent bundled `cloudflared`. The fetch
+response is never sent through raw HTTP body logging. `cloudflared.token` is
+the static override: it accepts only `env:VARNAME` or `file:/path/to/secret`,
+and `CLOUDFLARED_TUNNEL_TOKEN` is the direct environment equivalent. A static
+token takes precedence over managed fetch. In either mode, tunnel-client passes
+the token only through the child environment, waits for its loopback readiness
+endpoint, and propagates unexpected process exits.
 `cloudflared.path` / `CLOUDFLARED_PATH` is only an advanced source-build or test
 override; supported release archives do not require it.
 

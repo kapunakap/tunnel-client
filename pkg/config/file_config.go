@@ -77,6 +77,7 @@ type fileProcessConfig struct {
 
 type fileCloudflaredConfig struct {
 	Token        *string `yaml:"token"`
+	Managed      *bool   `yaml:"managed"`
 	Path         *string `yaml:"path"`
 	ReadyTimeout *string `yaml:"ready_timeout"`
 }
@@ -263,6 +264,7 @@ func (c fileConfig) toEnv(lookupEnv func(string) (string, bool)) (map[string]str
 	setBool(env, "OPEN_WEB_UI", c.AdminUI.OpenBrowser)
 	setInt(env, "ADMIN_UI_LOG_BUFFER_EVENTS", c.AdminUI.LogBufferEvents)
 	setString(env, "PID_FILE", c.Process.PIDFile)
+	setBool(env, "CLOUDFLARED_MANAGED", c.Cloudflared.Managed)
 	setString(env, "CLOUDFLARED_PATH", c.Cloudflared.Path)
 	setString(env, "CLOUDFLARED_READY_TIMEOUT", c.Cloudflared.ReadyTimeout)
 

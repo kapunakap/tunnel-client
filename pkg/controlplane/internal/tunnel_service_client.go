@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jpillora/backoff"
@@ -32,12 +33,14 @@ import (
 )
 
 const (
-	pollPathFormat               = "/v1/tunnels/%s/poll"
-	responsePathFormat           = "/v1/tunnels/%s/response"
-	metadataPathFormat           = "/v1/tunnels/%s"
-	maxControlPlaneErrorBodySize = 64 * 1024
-	tunnelIntegrationSocketEnv   = "TUNNEL_INTEGRATION_TUNNEL_SERVICE_SOCKET_PATH"
-	defaultResponseRetryAttempts = 3
+	pollPathFormat                        = "/v1/tunnels/%s/poll"
+	responsePathFormat                    = "/v1/tunnels/%s/response"
+	metadataPathFormat                    = "/v1/tunnels/%s"
+	managedCloudflarePathFormat           = "/v1/tunnels/%s/cloudflare/runtime"
+	maxControlPlaneErrorBodySize          = 64 * 1024
+	tunnelIntegrationSocketEnv            = "TUNNEL_INTEGRATION_TUNNEL_SERVICE_SOCKET_PATH"
+	defaultResponseRetryAttempts          = 3
+	defaultManagedCloudflareRetryAttempts = 3
 )
 
 var errMissingConfig = errors.New("controlplane client: config is required")
@@ -45,20 +48,24 @@ var errMissingConfig = errors.New("controlplane client: config is required")
 // TunnelServiceClient implements the Fetcher and Responder interfaces backed by
 // the control-plane HTTP API.
 type TunnelServiceClient struct {
-	client                *http.Client
-	pollEndpoint          *url.URL
-	responseEndpoint      *url.URL
-	metadataEndpoint      *url.URL
-	logger                *slog.Logger
-	tunnelID              types.TunnelID
-	apiKey                string
-	userAgent             string
-	pollTimeout           time.Duration
-	pollGuardrail         time.Duration
-	now                   func() time.Time
-	responseRetryAttempts int
-	newResponseBackoff    func() *backoff.Backoff
-	retrySleep            func(context.Context, time.Duration) bool
+	client                         *http.Client
+	secretClient                   *http.Client
+	pollEndpoint                   *url.URL
+	responseEndpoint               *url.URL
+	metadataEndpoint               *url.URL
+	managedCloudflareEndpoint      *url.URL
+	logger                         *slog.Logger
+	tunnelID                       types.TunnelID
+	apiKey                         string
+	userAgent                      string
+	pollTimeout                    time.Duration
+	pollGuardrail                  time.Duration
+	now                            func() time.Time
+	responseRetryAttempts          int
+	newResponseBackoff             func() *backoff.Backoff
+	managedCloudflareRetryAttempts int
+	newManagedCloudflareBackoff    func() *backoff.Backoff
+	retrySleep                     func(context.Context, time.Duration) bool
 }
 
 // NewTunnelServiceClient constructs an HTTP-backed client using the provided config.
@@ -90,12 +97,17 @@ func NewTunnelServiceClient(ctx context.Context, cfg *config.ControlPlaneConfig,
 	pollEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(pollPathFormat, tunnelIDSegment))
 	responseEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(responsePathFormat, tunnelIDSegment))
 	metadataEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(metadataPathFormat, tunnelIDSegment))
+	managedCloudflareEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(managedCloudflarePathFormat, tunnelIDSegment))
 
 	pollTimeout := cfg.PollTimeoutOrDefault()
 	pollGuardrail := cfg.PollDeadlineGuardrailOrDefault()
 	pollDeadline := cfg.PollDeadlineTimeoutOrDefault()
 
 	transport, err := buildControlPlaneHTTPTransport(cfg, tlsBundle, logger, loggingCfg, meterProvider)
+	if err != nil {
+		return nil, err
+	}
+	secretTransport, err := buildSecretControlPlaneHTTPTransport(cfg, tlsBundle, logger, meterProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -106,19 +118,26 @@ func NewTunnelServiceClient(ctx context.Context, cfg *config.ControlPlaneConfig,
 			Timeout:   pollDeadline,
 			Transport: transport,
 		},
-		pollEndpoint:          pollEndpoint,
-		responseEndpoint:      responseEndpoint,
-		metadataEndpoint:      metadataEndpoint,
-		logger:                logger,
-		tunnelID:              cfg.TunnelID,
-		apiKey:                cfg.APIKey,
-		userAgent:             version.UserAgent,
-		pollTimeout:           pollTimeout,
-		pollGuardrail:         pollGuardrail,
-		now:                   time.Now,
-		responseRetryAttempts: defaultResponseRetryAttempts,
-		newResponseBackoff:    newControlPlaneBackoff,
-		retrySleep:            sleepWithContext,
+		secretClient: &http.Client{
+			Timeout:   pollDeadline,
+			Transport: secretTransport,
+		},
+		pollEndpoint:                   pollEndpoint,
+		responseEndpoint:               responseEndpoint,
+		metadataEndpoint:               metadataEndpoint,
+		managedCloudflareEndpoint:      managedCloudflareEndpoint,
+		logger:                         logger,
+		tunnelID:                       cfg.TunnelID,
+		apiKey:                         cfg.APIKey,
+		userAgent:                      version.UserAgent,
+		pollTimeout:                    pollTimeout,
+		pollGuardrail:                  pollGuardrail,
+		now:                            time.Now,
+		responseRetryAttempts:          defaultResponseRetryAttempts,
+		newResponseBackoff:             newControlPlaneBackoff,
+		managedCloudflareRetryAttempts: defaultManagedCloudflareRetryAttempts,
+		newManagedCloudflareBackoff:    newControlPlaneBackoff,
+		retrySleep:                     sleepWithContext,
 	}
 	logger.InfoContext(ctx, "TunnelServiceClient created",
 		slog.String("tunnel_id", client.tunnelID.String()),
@@ -255,10 +274,125 @@ func (c *TunnelServiceClient) FetchTunnelMetadata(ctx context.Context) (*TunnelM
 	return &metadata, nil
 }
 
+type managedCloudflareRuntimeResponse struct {
+	CloudflareTunnel *controlplane.ManagedCloudflareTunnelMetadata `json:"cloudflare_tunnel"`
+	RuntimeToken     string                                        `json:"runtime_token"`
+}
+
+// FetchManagedCloudflareTunnel retrieves the runtime-only Cloudflare
+// connection material for the configured logical tunnel. It intentionally uses
+// a client that never enables raw HTTP body logging because the successful
+// response contains the runtime token.
+func (c *TunnelServiceClient) FetchManagedCloudflareTunnel(ctx context.Context) (*controlplane.ManagedCloudflareTunnelRuntime, error) {
+	if c == nil || c.secretClient == nil || c.managedCloudflareEndpoint == nil {
+		return nil, errors.New("controlplane client: managed Cloudflare runtime client is unavailable")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.managedCloudflareEndpoint.String(), nil)
+	if err != nil {
+		return nil, errors.New("controlplane client: build managed Cloudflare runtime request")
+	}
+
+	attempts := c.managedCloudflareRetryAttempts
+	if attempts <= 0 {
+		attempts = defaultManagedCloudflareRetryAttempts
+	}
+	runtimeBackoff := c.managedCloudflareBackoff()
+	for attempt := 1; attempt <= attempts; attempt++ {
+		resp, err := c.secretClient.Do(req.Clone(ctx))
+		if err != nil {
+			if attempt == attempts {
+				return nil, errors.New("controlplane client: fetch managed Cloudflare runtime")
+			}
+			if !c.waitForRetry(ctx, runtimeBackoff.Duration()) {
+				return nil, managedCloudflareRetryWaitError(ctx)
+			}
+			continue
+		}
+
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			statusErr := newSecretAPIStatusError(
+				"controlplane client: unexpected managed Cloudflare runtime status",
+				resp,
+				c.nowTime(),
+			)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if !isRetryableManagedCloudflareStatus(resp.StatusCode) || attempt == attempts {
+				return nil, statusErr
+			}
+			retryAfter, hasRetryAfter := statusErr.RetryAfter()
+			delay := retryDelay(runtimeBackoff.Duration(), retryAfter, hasRetryAfter)
+			if !c.waitForRetry(ctx, delay) {
+				return nil, managedCloudflareRetryWaitError(ctx)
+			}
+			continue
+		}
+
+		var payload managedCloudflareRuntimeResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			_ = resp.Body.Close()
+			return nil, errors.New("controlplane client: decode managed Cloudflare runtime response")
+		}
+		_ = resp.Body.Close()
+		if payload.CloudflareTunnel == nil ||
+			strings.TrimSpace(payload.CloudflareTunnel.TunnelID) == "" ||
+			strings.TrimSpace(payload.CloudflareTunnel.Name) == "" ||
+			strings.TrimSpace(payload.CloudflareTunnel.AccountID) == "" ||
+			strings.TrimSpace(payload.RuntimeToken) == "" {
+			return nil, errors.New("controlplane client: invalid managed Cloudflare runtime response")
+		}
+
+		return &controlplane.ManagedCloudflareTunnelRuntime{
+			CloudflareTunnel: *payload.CloudflareTunnel,
+			RuntimeToken:     payload.RuntimeToken,
+		}, nil
+	}
+
+	return nil, errors.New("controlplane client: exhausted managed Cloudflare runtime retries")
+}
+
+// newSecretAPIStatusError intentionally skips the response body. Runtime-token
+// endpoints must not copy arbitrary server payloads into errors or logs.
+func newSecretAPIStatusError(prefix string, resp *http.Response, now time.Time) *APIStatusError {
+	statusErr := &APIStatusError{
+		prefix:     prefix,
+		statusCode: resp.StatusCode,
+		status:     resp.Status,
+	}
+	statusErr.retryAfter, statusErr.hasRetryAfter = parseRetryAfter(
+		resp.Header.Get("Retry-After"),
+		now,
+	)
+	return statusErr
+}
+
 func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *config.LoggingConfig, meterProvider otelmetric.MeterProvider) (http.RoundTripper, error) {
+	return buildControlPlaneHTTPTransportWithLogging(
+		cfg,
+		tlsBundle,
+		logger,
+		loggingCfg,
+		meterProvider,
+		true,
+	)
+}
+
+func buildSecretControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, meterProvider otelmetric.MeterProvider) (http.RoundTripper, error) {
+	return buildControlPlaneHTTPTransportWithLogging(
+		cfg,
+		tlsBundle,
+		logger,
+		nil,
+		meterProvider,
+		false,
+	)
+}
+
+func buildControlPlaneHTTPTransportWithLogging(cfg *config.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *config.LoggingConfig, meterProvider otelmetric.MeterProvider, includeRawHTTPLogging bool) (http.RoundTripper, error) {
 	// Order matters (outermost to innermost):
 	//   1. Control-plane round tripper applies auth headers before anything else.
-	//   2. Logging wraps otel instrumentation so dumps include the final headers.
+	//   2. Optional logging wraps otel instrumentation so dumps include the final headers.
 	//   3. otelhttp instrumentation and its route labeler sit close to the network for accurate metrics.
 	//   4. Response receipt recording sits closest to the network so outer response
 	//      middleware cannot delay the timestamp by consuming the response body.
@@ -292,7 +426,9 @@ func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *t
 		base,
 		otelhttp.WithMeterProvider(meterProvider),
 	)
-	base = tclog.NewRoundTripper(base, logger, loggingCfg, tclog.ComponentControlPlane)
+	if includeRawHTTPLogging {
+		base = tclog.NewRoundTripper(base, logger, loggingCfg, tclog.ComponentControlPlane)
+	}
 
 	return newControlPlaneRoundTripper(
 		base,
@@ -484,6 +620,13 @@ func (c *TunnelServiceClient) responseBackoff() *backoff.Backoff {
 	return newControlPlaneBackoff()
 }
 
+func (c *TunnelServiceClient) managedCloudflareBackoff() *backoff.Backoff {
+	if c.newManagedCloudflareBackoff != nil {
+		return c.newManagedCloudflareBackoff()
+	}
+	return newControlPlaneBackoff()
+}
+
 func (c *TunnelServiceClient) waitForRetry(ctx context.Context, delay time.Duration) bool {
 	if c.retrySleep != nil {
 		return c.retrySleep(ctx, delay)
@@ -517,11 +660,23 @@ func isRetryableResponseStatus(statusCode int) bool {
 	}
 }
 
+func isRetryableManagedCloudflareStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests ||
+		(statusCode >= http.StatusInternalServerError && statusCode <= 599)
+}
+
 func retryWaitError(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("controlplane responder: retry wait: %w", err)
 	}
 	return errors.New("controlplane responder: retry wait interrupted")
+}
+
+func managedCloudflareRetryWaitError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("controlplane client: managed Cloudflare runtime retry wait: %w", err)
+	}
+	return errors.New("controlplane client: managed Cloudflare runtime retry wait interrupted")
 }
 
 func (c *TunnelServiceClient) nowTime() time.Time {

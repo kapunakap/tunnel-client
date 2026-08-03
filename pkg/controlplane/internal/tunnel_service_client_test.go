@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -1352,6 +1353,85 @@ func TestTunnelServiceClientFetchTunnelMetadataStatusError(t *testing.T) {
 	}
 	assert.Equal(t, http.StatusForbidden, statusErr.StatusCode())
 	assert.Equal(t, "403 Forbidden", statusErr.Status())
+}
+
+func TestTunnelServiceClientFetchManagedCloudflareTunnelUsesSecretSafeTransport(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tunnelID     = "cli-tunnel"
+		apiKey       = "test-api-key"
+		runtimeToken = "managed-runtime-secret-token"
+	)
+
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/v1/tunnels/"+url.PathEscape(tunnelID)+"/cloudflare/runtime"; got != want {
+			t.Fatalf("unexpected path: got %q want %q", got, want)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+apiKey {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"cloudflare_tunnel": {
+				"tunnel_id": "provider-tunnel-id",
+				"name": "managed-provider-name",
+				"account_id": "provider-account-id",
+				"created_at": "2026-07-31T00:00:00Z"
+			},
+			"runtime_token": "` + runtimeToken + `"
+		}`))
+	}))
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client, err := NewTunnelServiceClient(context.Background(), &config.ControlPlaneConfig{
+		BaseURL:  mustParseURL(t, server.URL),
+		TunnelID: types.TunnelID(tunnelID),
+		APIKey:   apiKey,
+	}, nil, logger, &config.LoggingConfig{HTTPRawUnsafe: true}, testMeterProvider)
+	require.NoError(t, err)
+
+	runtime, err := client.FetchManagedCloudflareTunnel(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, runtime)
+	require.Equal(t, "provider-tunnel-id", runtime.CloudflareTunnel.TunnelID)
+	require.Equal(t, "managed-provider-name", runtime.CloudflareTunnel.Name)
+	require.Equal(t, "provider-account-id", runtime.CloudflareTunnel.AccountID)
+	require.Equal(t, runtimeToken, runtime.RuntimeToken)
+	require.NotContains(t, logs.String(), runtimeToken)
+	require.NotContains(t, logs.String(), "raw http response")
+}
+
+func TestTunnelServiceClientFetchManagedCloudflareTunnelStatusErrorDoesNotReadSecretBody(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tunnelID     = "cli-tunnel"
+		runtimeToken = "managed-runtime-secret-token"
+	)
+
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"message":"` + runtimeToken + `"}}`))
+	}))
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client, err := NewTunnelServiceClient(context.Background(), &config.ControlPlaneConfig{
+		BaseURL:  mustParseURL(t, server.URL),
+		TunnelID: types.TunnelID(tunnelID),
+		APIKey:   "test-api-key",
+	}, nil, logger, &config.LoggingConfig{HTTPRawUnsafe: true}, testMeterProvider)
+	require.NoError(t, err)
+
+	_, err = client.FetchManagedCloudflareTunnel(context.Background())
+	require.Error(t, err)
+	var statusErr *APIStatusError
+	require.ErrorAs(t, err, &statusErr)
+	require.Equal(t, http.StatusForbidden, statusErr.StatusCode())
+	require.NotContains(t, err.Error(), runtimeToken)
+	require.NotContains(t, logs.String(), runtimeToken)
 }
 
 type errorReadCloser struct {

@@ -663,6 +663,7 @@ func buildEffectiveConfigSnapshot(cfg *config.Config) map[string]any {
 		},
 		"cloudflared": map[string]any{
 			"enabled":       cfg.Cloudflared.Enabled(),
+			"managed":       cfg.Cloudflared.Managed,
 			"token":         redactedPresence(cfg.Cloudflared.Token),
 			"path":          redactString(cfg.Cloudflared.Path),
 			"ready_timeout": durationForSnapshot(cfg.Cloudflared.ReadyTimeout),

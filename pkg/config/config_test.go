@@ -251,6 +251,96 @@ mcp:
 	}
 }
 
+func TestLoadManagedCloudflaredModeFromFlagAndEnvironment(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		args []string
+		env  map[string]string
+	}{
+		{
+			name: "flag",
+			args: []string{"--cloudflared.managed"},
+			env:  map[string]string{"CONTROL_PLANE_API_KEY": "control-key"},
+		},
+		{
+			name: "environment",
+			env: map[string]string{
+				"CONTROL_PLANE_API_KEY": "control-key",
+				"CLOUDFLARED_MANAGED":   "true",
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			args := []string{
+				"--control-plane.tunnel-id", flagTunnelID,
+				"--mcp.server-url", "https://mcp.example",
+			}
+			args = append(args, testCase.args...)
+			cfg, err := Load(args, lookupEnvMap(testCase.env))
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if !cfg.Cloudflared.Managed {
+				t.Fatal("expected managed cloudflared mode")
+			}
+			if !cfg.Cloudflared.Enabled() {
+				t.Fatal("expected managed cloudflared mode to enable supervision")
+			}
+			if cfg.Cloudflared.Token != "" {
+				t.Fatal("managed cloudflared mode must not synthesize a token")
+			}
+		})
+	}
+}
+
+func TestLoadManagedCloudflaredModeFromYAML(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeTempConfigFile(t, `
+control_plane:
+  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  api_key: env:YAML_CONTROL_PLANE_API_KEY
+cloudflared:
+  managed: true
+mcp:
+  server_urls:
+    - channel: main
+      url: https://yaml-mcp.example/mcp
+`)
+
+	cfg, err := Load([]string{"--config", configPath}, lookupEnvMap(map[string]string{
+		"YAML_CONTROL_PLANE_API_KEY": "yaml-control-key",
+	}))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Cloudflared.Managed || !cfg.Cloudflared.Enabled() {
+		t.Fatalf("expected managed cloudflared mode, got %#v", cfg.Cloudflared)
+	}
+}
+
+func TestLoadRejectsInvalidManagedCloudflaredEnvironment(t *testing.T) {
+	t.Parallel()
+
+	_, err := Load([]string{
+		"--control-plane.tunnel-id", flagTunnelID,
+		"--mcp.server-url", "https://mcp.example",
+	}, lookupEnvMap(map[string]string{
+		"CONTROL_PLANE_API_KEY": "control-key",
+		"CLOUDFLARED_MANAGED":   "not-a-bool",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "CLOUDFLARED_MANAGED") {
+		t.Fatalf("expected invalid CLOUDFLARED_MANAGED error, got %v", err)
+	}
+}
+
 func TestLoadCloudflaredEnvironmentOverridesInvalidYAMLReference(t *testing.T) {
 	t.Parallel()
 

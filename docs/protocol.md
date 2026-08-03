@@ -14,15 +14,18 @@ A tunnel client:
 
 1. authenticates to `https://api.openai.com`;
 2. optionally fetches tunnel metadata for startup diagnostics;
-3. long-polls for commands addressed to one tunnel;
-4. forwards each command to the configured MCP server; and
-5. posts the MCP result back to the control plane.
+3. optionally fetches managed Cloudflare runtime material to launch the bundled
+   `cloudflared` companion;
+4. long-polls for commands addressed to one tunnel;
+5. forwards each command to the configured MCP server; and
+6. posts the MCP result back to the control plane.
 
 The canonical client endpoints are:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/tunnels/{tunnel_id}` | Fetch minimal startup metadata. |
+| `GET` | `/v1/tunnels/{tunnel_id}/cloudflare/runtime` | Fetch managed Cloudflare metadata plus the runtime token for an explicitly enabled bundled companion. |
 | `GET` | `/v1/tunnels/{tunnel_id}/poll` | Long-poll for pending commands. |
 | `POST` | `/v1/tunnels/{tunnel_id}/response` | Return the result for one command. |
 
@@ -47,6 +50,20 @@ X-Tunnel-Client-Version: 1.2.3
 
 Treat tunnel IDs, request IDs, and shard tokens as opaque strings. Do not parse
 them or infer routing from their contents.
+
+## Managed Cloudflare runtime fetch
+
+When managed bundled-`cloudflared` mode is explicitly enabled and no static
+token is configured, fetch
+`GET /v1/tunnels/{tunnel_id}/cloudflare/runtime` before starting the child
+process. The response contains non-secret Cloudflare metadata and one runtime
+token. Treat the full response as secret-bearing: do not write it to disk,
+argv, logs, metrics, support exports, or generic raw HTTP traces. The service
+returns `Cache-Control: no-store`; clients must not cache the response.
+
+The static `cloudflared.token` / `CLOUDFLARED_TUNNEL_TOKEN` path takes
+precedence and must bypass this fetch. A 401 or 403 is an authorization failure
+and must not fall back to another credential path.
 
 ## Poll loop
 

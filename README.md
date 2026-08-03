@@ -207,8 +207,19 @@ therefore reports the tag semantic version through `tunnel-client --version`,
 Supported release archives also bundle pinned `cloudflared` `2026.7.2` beside
 the CLI for Linux `amd64`/`arm64`, macOS `amd64`/`arm64`, and Windows
 `amd64`/`arm64`.
-Docker images bundle the Linux `amd64`/`arm64` companion. To run a
-pre-provisioned Cloudflare tunnel without putting its token in argv:
+Docker images bundle the Linux `amd64`/`arm64` companion. For a logical tunnel
+created with managed Cloudflare provisioning, let the authenticated client fetch
+the runtime token and start the companion without distributing a static token:
+
+```bash
+tunnel-client run \
+  --cloudflared.managed \
+  --control-plane.tunnel-id tunnel_0123456789abcdef0123456789abcdef \
+  --mcp.server-url https://mcp.example.com/mcp
+```
+
+For a pre-provisioned Cloudflare tunnel, a static token remains available as an
+explicit override and is never put in argv:
 
 ```bash
 export CLOUDFLARED_TOKEN='...'

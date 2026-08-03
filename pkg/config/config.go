@@ -208,13 +208,17 @@ type ProcessConfig struct {
 }
 
 // CloudflaredConfig defines the optional bundled Cloudflare Tunnel companion
-// process. A token enables supervision; an empty token leaves the normal
-// tunnel-client runtime unchanged.
+// process. A configured token or explicit managed mode enables supervision;
+// otherwise the normal tunnel-client runtime is unchanged.
 type CloudflaredConfig struct {
 	// Token is the pre-provisioned remotely managed Cloudflare Tunnel token.
 	// It is kept in memory only and is passed to cloudflared through its
 	// TUNNEL_TOKEN environment variable, never argv.
 	Token string
+	// Managed fetches the remotely managed Cloudflare Tunnel runtime token from
+	// tunnel-service during startup. A configured Token takes precedence so
+	// existing pre-provisioned deployments remain unchanged.
+	Managed bool
 	// Path overrides sibling-binary discovery for source builds and tests.
 	Path string
 	// ReadyTimeout bounds startup while waiting for cloudflared /ready.
@@ -223,7 +227,7 @@ type CloudflaredConfig struct {
 
 // Enabled reports whether the bundled cloudflared companion should run.
 func (c CloudflaredConfig) Enabled() bool {
-	return strings.TrimSpace(c.Token) != ""
+	return strings.TrimSpace(c.Token) != "" || c.Managed
 }
 
 // MCPConfig captures configuration for the Model Context Protocol integration.
@@ -423,6 +427,7 @@ func WriteUsage(fs *pflag.FlagSet, w io.Writer) {
 	_, _ = fmt.Fprintln(fs.Output(), "  OPEN_WEB_UI\tSet to true to open the embedded web UI in a browser on startup (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  ADMIN_UI_LOG_BUFFER_EVENTS\tRecent log-event capacity for the embedded web UI and export archive (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  CLOUDFLARED_TUNNEL_TOKEN\tPre-provisioned remotely managed Cloudflare Tunnel token; enables bundled cloudflared supervision (optional)")
+	_, _ = fmt.Fprintln(fs.Output(), "  CLOUDFLARED_MANAGED\tFetch the managed Cloudflare Tunnel runtime token from the control plane on startup (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  CLOUDFLARED_PATH\tAdvanced override for the bundled cloudflared executable path (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  CLOUDFLARED_READY_TIMEOUT\tMaximum startup wait for bundled cloudflared readiness (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  CA_BUNDLE\tPath to a PEM CA bundle used for outbound TLS connections (additive to system trust) (optional)")
@@ -464,6 +469,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Int("admin-ui.log-buffer-events", defaultAdminUILogBufferEvents, "Number of recent log events to keep in memory for the embedded web UI and export archive (env.ADMIN_UI_LOG_BUFFER_EVENTS, max 100000)")
 	fs.String("pid.file", "", "File to write the tunnel-client process ID to (env.PID_FILE)")
 	fs.String("cloudflared.token", "", "Reference to an environment variable or file containing a pre-provisioned Cloudflare Tunnel token (format env:VARNAME or file:/path; env.CLOUDFLARED_TUNNEL_TOKEN)")
+	fs.Bool("cloudflared.managed", false, "Fetch the managed Cloudflare Tunnel runtime token from the control plane on startup (env.CLOUDFLARED_MANAGED)")
 	fs.String("cloudflared.path", "", "Path to the bundled cloudflared executable; defaults to the executable beside tunnel-client (env.CLOUDFLARED_PATH)")
 	fs.Duration("cloudflared.ready-timeout", defaultCloudflaredReadyTimeout, "Maximum time to wait for bundled cloudflared to report ready (env.CLOUDFLARED_READY_TIMEOUT)")
 	fs.String("http-proxy", "", "Global outbound HTTP proxy (applies to control-plane, MCP, and Harpoon) (format <url|env:VAR>)")
@@ -1423,6 +1429,11 @@ func buildCloudflaredConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, b
 		token = resolved
 	}
 
+	managed, err := resolveCloudflaredManaged(fs, lookupEnv)
+	if err != nil {
+		return CloudflaredConfig{}, err
+	}
+
 	path := firstSet(
 		getValue(fs, "cloudflared.path"),
 		envOrDefault(lookupEnv, "CLOUDFLARED_PATH", ""),
@@ -1441,9 +1452,30 @@ func buildCloudflaredConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, b
 
 	return CloudflaredConfig{
 		Token:        token,
+		Managed:      managed,
 		Path:         strings.TrimSpace(path),
 		ReadyTimeout: readyTimeout,
 	}, nil
+}
+
+func resolveCloudflaredManaged(fs *pflag.FlagSet, lookupEnv func(string) (string, bool)) (bool, error) {
+	if flag := fs.Lookup("cloudflared.managed"); flag != nil && flag.Changed {
+		val, err := fs.GetBool("cloudflared.managed")
+		if err != nil {
+			return false, fmt.Errorf("parse --cloudflared.managed: %w", err)
+		}
+		return val, nil
+	}
+
+	if envVal, ok := lookupEnv("CLOUDFLARED_MANAGED"); ok && envVal != "" {
+		val, err := strconv.ParseBool(envVal)
+		if err != nil {
+			return false, fmt.Errorf("parse CLOUDFLARED_MANAGED: %w", err)
+		}
+		return val, nil
+	}
+
+	return false, nil
 }
 
 func resolveRequiredSecretReference(source, raw string, lookupEnv func(string) (string, bool)) (string, error) {

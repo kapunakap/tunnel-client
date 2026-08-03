@@ -267,6 +267,130 @@ func TestPostResponsePreservesNotFoundTerminalSuccess(t *testing.T) {
 	require.Equal(t, 1, attempts)
 }
 
+func TestFetchManagedCloudflareTunnelRetriesTransportFailure(t *testing.T) {
+	client := newResponseRetryTestClient(t)
+	attempts := 0
+	client.secretClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("temporary transport failure")}
+		}
+		return testManagedCloudflareRuntimeResponse(req), nil
+	})
+	client.newManagedCloudflareBackoff = deterministicResponseBackoff
+	var waits []time.Duration
+	client.retrySleep = func(_ context.Context, delay time.Duration) bool {
+		waits = append(waits, delay)
+		return true
+	}
+
+	runtime, err := client.FetchManagedCloudflareTunnel(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, runtime)
+	require.Equal(t, 2, attempts)
+	require.Equal(t, []time.Duration{defaultBackoffMin}, waits)
+}
+
+func TestFetchManagedCloudflareTunnelRetries429And5xx(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		header    string
+		wantDelay time.Duration
+	}{
+		{
+			name:      "429 honors Retry-After",
+			status:    http.StatusTooManyRequests,
+			header:    "5",
+			wantDelay: 5 * time.Second,
+		},
+		{
+			name:      "500 falls back to backoff",
+			status:    http.StatusInternalServerError,
+			wantDelay: defaultBackoffMin,
+		},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			client := newResponseRetryTestClient(t)
+			attempts := 0
+			client.secretClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				if attempts == 1 {
+					headers := make(http.Header)
+					if testCase.header != "" {
+						headers.Set("Retry-After", testCase.header)
+					}
+					return testHTTPResponse(req, testCase.status, headers), nil
+				}
+				return testManagedCloudflareRuntimeResponse(req), nil
+			})
+			client.newManagedCloudflareBackoff = deterministicResponseBackoff
+			var waits []time.Duration
+			client.retrySleep = func(_ context.Context, delay time.Duration) bool {
+				waits = append(waits, delay)
+				return true
+			}
+
+			runtime, err := client.FetchManagedCloudflareTunnel(context.Background())
+			require.NoError(t, err)
+			require.NotNil(t, runtime)
+			require.Equal(t, 2, attempts)
+			require.Equal(t, []time.Duration{testCase.wantDelay}, waits)
+		})
+	}
+}
+
+func TestFetchManagedCloudflareTunnelStopsWhenContextCanceledDuringRetryWait(t *testing.T) {
+	client := newResponseRetryTestClient(t)
+	attempts := 0
+	client.secretClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		return testHTTPResponse(req, http.StatusServiceUnavailable, http.Header{
+			"Retry-After": []string{"60"},
+		}), nil
+	})
+
+	waitStarted := make(chan struct{})
+	client.retrySleep = func(ctx context.Context, _ time.Duration) bool {
+		close(waitStarted)
+		<-ctx.Done()
+		return false
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.FetchManagedCloudflareTunnel(ctx)
+		result <- err
+	}()
+
+	<-waitStarted
+	cancel()
+	err := <-result
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, attempts)
+}
+
+func TestFetchManagedCloudflareTunnelDoesNotRetryNonRetryable4xx(t *testing.T) {
+	client := newResponseRetryTestClient(t)
+	attempts := 0
+	client.secretClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		return testHTTPResponse(req, http.StatusForbidden, nil), nil
+	})
+	client.retrySleep = func(_ context.Context, _ time.Duration) bool {
+		t.Fatal("non-retryable response must not wait for retry")
+		return false
+	}
+
+	_, err := client.FetchManagedCloudflareTunnel(context.Background())
+	require.Error(t, err)
+	require.Equal(t, 1, attempts)
+}
+
 func TestRetryableResponseStatuses(t *testing.T) {
 	for _, statusCode := range []int{
 		http.StatusRequestTimeout,
@@ -279,6 +403,21 @@ func TestRetryableResponseStatuses(t *testing.T) {
 	}
 	for _, statusCode := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
 		require.Falsef(t, isRetryableResponseStatus(statusCode), "status %d should not retry", statusCode)
+	}
+}
+
+func TestRetryableManagedCloudflareStatuses(t *testing.T) {
+	for _, statusCode := range []int{
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		require.Truef(t, isRetryableManagedCloudflareStatus(statusCode), "status %d should retry", statusCode)
+	}
+	for _, statusCode := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		require.Falsef(t, isRetryableManagedCloudflareStatus(statusCode), "status %d should not retry", statusCode)
 	}
 }
 
@@ -377,4 +516,19 @@ func testHTTPResponse(req *http.Request, statusCode int, headers http.Header) *h
 		Body:       io.NopCloser(strings.NewReader("")),
 		Request:    req,
 	}
+}
+
+func testManagedCloudflareRuntimeResponse(req *http.Request) *http.Response {
+	resp := testHTTPResponse(req, http.StatusOK, http.Header{
+		"Content-Type": []string{"application/json"},
+	})
+	resp.Body = io.NopCloser(strings.NewReader(`{
+		"cloudflare_tunnel": {
+			"tunnel_id": "provider-tunnel-id",
+			"name": "managed-provider-name",
+			"account_id": "provider-account-id"
+		},
+		"runtime_token": "managed-runtime-token"
+	}`))
+	return resp
 }

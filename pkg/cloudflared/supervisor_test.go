@@ -1,8 +1,8 @@
 package cloudflared
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,12 +13,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/controlplane"
 )
 
 func TestBundledManifestPinsProxyBuiltModule(t *testing.T) {
@@ -64,7 +66,7 @@ func TestSupervisorLaunchesStopsAndRedactsOutput(t *testing.T) {
 	t.Setenv("CLOUDFLARED_HELPER_MODE", "ready")
 	t.Setenv("CLOUDFLARED_HELPER_ECHO_TOKEN", "1")
 
-	var logs bytes.Buffer
+	var logs lockedBuffer
 	supervisor, state := newTestSupervisor(t, &logs, "secret-cloudflared-token")
 	startCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -83,6 +85,104 @@ func TestSupervisorLaunchesStopsAndRedactsOutput(t *testing.T) {
 	ready, reason = state.Readiness()
 	require.False(t, ready)
 	require.Equal(t, "cloudflared stopped", reason)
+}
+
+func TestSupervisorFetchesManagedRuntimeTokenAndRedactsOutput(t *testing.T) {
+	t.Setenv("GO_WANT_CLOUDFLARED_HELPER", "1")
+	t.Setenv("CLOUDFLARED_HELPER_MODE", "ready")
+	t.Setenv("CLOUDFLARED_HELPER_ECHO_TOKEN", "1")
+
+	const runtimeToken = "managed-runtime-secret-token"
+	fetcher := &managedRuntimeFetcherStub{
+		runtime: &controlplane.ManagedCloudflareTunnelRuntime{
+			CloudflareTunnel: controlplane.ManagedCloudflareTunnelMetadata{
+				TunnelID:  "provider-tunnel-id",
+				Name:      "managed-provider-name",
+				AccountID: "provider-account-id",
+			},
+			RuntimeToken: runtimeToken,
+		},
+	}
+	cfg := &config.CloudflaredConfig{
+		Managed:      true,
+		Path:         os.Args[0],
+		ReadyTimeout: 3 * time.Second,
+	}
+	redactedOutput := make(chan struct{}, 1)
+	var logs lockedBuffer
+	supervisor, state := newTestSupervisorWithConfig(t, &signalWriter{
+		writer: &logs,
+		marker: "[REDACTED]",
+		seen:   redactedOutput,
+	}, cfg, fetcher)
+
+	startCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, supervisor.Start(startCtx))
+	require.Equal(t, 1, fetcher.calls)
+	require.Empty(t, cfg.Token, "fetched runtime token must not be persisted in config")
+
+	ready, reason := state.Readiness()
+	require.True(t, ready, reason)
+	select {
+	case <-redactedOutput:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for redacted cloudflared output")
+	}
+	require.Contains(t, logs.String(), "[REDACTED]")
+	require.NotContains(t, logs.String(), runtimeToken)
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	require.NoError(t, supervisor.Stop(stopCtx))
+}
+
+func TestSupervisorPrefersConfiguredTokenOverManagedFetch(t *testing.T) {
+	t.Setenv("GO_WANT_CLOUDFLARED_HELPER", "1")
+	t.Setenv("CLOUDFLARED_HELPER_MODE", "ready")
+
+	fetcher := &managedRuntimeFetcherStub{
+		err: errors.New("managed fetch must not run"),
+	}
+	cfg := &config.CloudflaredConfig{
+		Token:        "configured-cloudflared-token",
+		Managed:      true,
+		Path:         os.Args[0],
+		ReadyTimeout: 3 * time.Second,
+	}
+	supervisor, _ := newTestSupervisorWithConfig(t, io.Discard, cfg, fetcher)
+
+	startCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, supervisor.Start(startCtx))
+	require.Zero(t, fetcher.calls)
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	require.NoError(t, supervisor.Stop(stopCtx))
+}
+
+func TestSupervisorManagedFetchFailureIsTokenSafe(t *testing.T) {
+	t.Parallel()
+
+	const runtimeToken = "managed-runtime-secret-token"
+	fetcher := &managedRuntimeFetcherStub{
+		err: errors.New("fetch failed with " + runtimeToken),
+	}
+	cfg := &config.CloudflaredConfig{
+		Managed:      true,
+		Path:         os.Args[0],
+		ReadyTimeout: 3 * time.Second,
+	}
+	supervisor, state := newTestSupervisorWithConfig(t, io.Discard, cfg, fetcher)
+
+	err := supervisor.Start(context.Background())
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), runtimeToken)
+	require.Equal(t, 1, fetcher.calls)
+	ready, reason := state.Readiness()
+	require.False(t, ready)
+	require.NotContains(t, reason, runtimeToken)
 }
 
 func TestSupervisorReturnsStartupFailureWhenChildExits(t *testing.T) {
@@ -150,12 +250,18 @@ func newTestSupervisor(t *testing.T, output io.Writer, token string) (*Superviso
 		Path:         os.Args[0],
 		ReadyTimeout: 3 * time.Second,
 	}
+	return newTestSupervisorWithConfig(t, output, cfg, nil)
+}
+
+func newTestSupervisorWithConfig(t *testing.T, output io.Writer, cfg *config.CloudflaredConfig, fetcher controlplane.ManagedCloudflareTunnelFetcher) (*Supervisor, *State) {
+	t.Helper()
 	state := NewState(cfg)
 	logger := slog.New(slog.NewTextHandler(output, nil))
 	supervisor, err := NewSupervisor(supervisorParams{
-		Config: cfg,
-		State:  state,
-		Logger: logger,
+		Config:                cfg,
+		State:                 state,
+		Logger:                logger,
+		ManagedRuntimeFetcher: fetcher,
 	})
 	require.NoError(t, err)
 	supervisor.newCommand = func(_ string, args ...string) *exec.Cmd {
@@ -163,6 +269,54 @@ func newTestSupervisor(t *testing.T, output io.Writer, token string) (*Superviso
 		return exec.Command(os.Args[0], helperArgs...)
 	}
 	return supervisor, state
+}
+
+type managedRuntimeFetcherStub struct {
+	runtime *controlplane.ManagedCloudflareTunnelRuntime
+	err     error
+	calls   int
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+type signalWriter struct {
+	writer io.Writer
+	marker string
+	seen   chan<- struct{}
+}
+
+func (w *signalWriter) Write(payload []byte) (int, error) {
+	written, err := w.writer.Write(payload)
+	if err != nil {
+		return written, err
+	}
+	if strings.Contains(string(payload[:written]), w.marker) {
+		select {
+		case w.seen <- struct{}{}:
+		default:
+		}
+	}
+	return written, nil
+}
+
+func (b *lockedBuffer) Write(payload []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(payload)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func (f *managedRuntimeFetcherStub) FetchManagedCloudflareTunnel(context.Context) (*controlplane.ManagedCloudflareTunnelRuntime, error) {
+	f.calls++
+	return f.runtime, f.err
 }
 
 func TestCloudflaredHelperProcess(t *testing.T) {

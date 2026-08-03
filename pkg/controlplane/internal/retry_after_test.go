@@ -401,7 +401,13 @@ func TestRetryableResponseStatuses(t *testing.T) {
 	} {
 		require.Truef(t, isRetryableResponseStatus(statusCode), "status %d should retry", statusCode)
 	}
-	for _, statusCode := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+	for _, statusCode := range []int{
+		http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+		http.StatusRequestEntityTooLarge,
+	} {
 		require.Falsef(t, isRetryableResponseStatus(statusCode), "status %d should not retry", statusCode)
 	}
 }

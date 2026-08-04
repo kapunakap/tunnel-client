@@ -80,12 +80,9 @@ def _started_fastmcp_echo_server(calls: list[str]) -> Iterator[str]:
         calls.append(name)
         return {"greeting": f"hello {name}"}
 
-    mcp.settings.host = "127.0.0.1"
-    mcp.settings.port = port
-    mcp.settings.streamable_http_path = "/mcp"
     server = uvicorn.Server(
         uvicorn.Config(
-            mcp.streamable_http_app(),
+            mcp.http_app(path="/mcp"),
             host="127.0.0.1",
             port=port,
             log_level="warning",

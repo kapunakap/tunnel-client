@@ -207,9 +207,12 @@ therefore reports the tag semantic version through `tunnel-client --version`,
 Supported release archives also bundle pinned `cloudflared` `2026.7.2` beside
 the CLI for Linux `amd64`/`arm64`, macOS `amd64`/`arm64`, and Windows
 `amd64`/`arm64`.
-Docker images bundle the Linux `amd64`/`arm64` companion. For a logical tunnel
-created with managed Cloudflare provisioning, let the authenticated client fetch
-the runtime token and start the companion without distributing a static token:
+Official release images are published at `ghcr.io/openai/tunnel-client` for
+Linux `amd64` and `arm64`; they bundle the matching companion. Pin an exact
+`vX.Y.Z` tag or digest for production. Stable releases also update the
+`X.Y` and `latest` aliases; prereleases do not. For a logical tunnel created
+with managed Cloudflare provisioning, let the authenticated client fetch the
+runtime token and start the companion without distributing a static token:
 
 ```bash
 tunnel-client run \

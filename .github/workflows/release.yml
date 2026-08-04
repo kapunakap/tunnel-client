@@ -168,7 +168,9 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs:
+      - build
+      - container
     runs-on: macos-latest
     permissions:
       actions: read
@@ -285,3 +287,81 @@ jobs:
             dist/public/*.tar.gz
             dist/public/SHA256SUMS.txt
             dist/public/PUBLIC_URLS.txt
+
+  container:
+    name: Publish container
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Derive release metadata
+        if: ${{ github.ref_type == 'tag' }}
+        id: release_meta
+        run: |
+          while IFS='=' read -r key value; do
+            echo "${key}=${value}" >> "${GITHUB_OUTPUT}"
+          done < <(./scripts/release_tag.sh parse "${GITHUB_REF_NAME}")
+          ./scripts/release_tag.sh check-source-version "${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF_NAME}" == *"+"* ]]; then
+            echo "Docker image tags do not support semver build metadata: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Log in to GitHub Container Registry
+        if: ${{ github.ref_type == 'tag' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract container metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{raw}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.release_meta.outputs.prerelease == 'false' }}
+            type=sha,format=long,prefix=sha-
+            type=raw,value=latest,enable=${{ steps.release_meta.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=tunnel-client
+            org.opencontainers.image.description=Customer-run client for Secure MCP Tunnel
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: Build and push multi-architecture image
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.ref_type == 'tag' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GOPROXY=${{ env.GOPROXY }}
+          cache-from: type=gha,scope=tunnel-client-container
+          cache-to: type=gha,mode=max,scope=tunnel-client-container
+          provenance: false
+          sbom: true
+      - name: Attest container provenance
+        if: ${{ github.ref_type == 'tag' }}
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false

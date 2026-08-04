@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: tunnel-client
-          image: tunnel-client:latest
+          image: ghcr.io/openai/tunnel-client:v1.2.3
           env:
             - name: CONTROL_PLANE_TUNNEL_ID
               value: tunnel_0123456789abcdef0123456789abcdef
@@ -48,6 +48,7 @@ spec:
 The default health listener is `127.0.0.1:8080`. This example sets
 `HEALTH_LISTEN_ADDR=:8080` so kubelet probes can reach `/healthz` and `/readyz`
 on the Pod IP; keep the health port inside trusted cluster networking.
+Replace the example `v1.2.3` tag with a released version or digest.
 
 ## Replicas and active-active behavior
 

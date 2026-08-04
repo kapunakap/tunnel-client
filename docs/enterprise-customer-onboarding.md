@@ -370,6 +370,9 @@ export CONTROL_PLANE_BASE_URL="<CONTROL_PLANE_BASE_URL>"
 
 #### Docker
 
+The container examples use an illustrative `v1.2.3` tag. Replace it with a
+released version or digest.
+
 ```bash
 docker run --rm \
   -e CONTROL_PLANE_API_KEY="sk-..." \
@@ -380,7 +383,7 @@ docker run --rm \
   -e LOG_FORMAT="json" \
   -e HEALTH_LISTEN_ADDR=":8080" \
   -p 8080:8080 \
-  tunnel-client:latest
+  ghcr.io/openai/tunnel-client:v1.2.3
 ```
 
 #### Kubernetes (sidecar pattern)
@@ -397,7 +400,7 @@ spec:
       ports:
         - containerPort: 3000
     - name: tunnel-client
-      image: tunnel-client:latest
+      image: ghcr.io/openai/tunnel-client:v1.2.3
       env:
         - name: CONTROL_PLANE_TUNNEL_ID
           value: <tunnel_id>

@@ -23,6 +23,14 @@ make release-source-version VERSION=1.2.3
 make release-tag VERSION=1.2.3
 ```
 
+The release workflow validates the multi-architecture image on `master` and
+publishes it to `ghcr.io/openai/tunnel-client` for Linux `amd64` and `arm64`
+from release tags. Stable `v1.2.3` tags publish `v1.2.3`, `1.2.3`, `1.2`,
+`latest`, and `sha-<full-commit-sha>`; prereleases publish only their exact
+version tags and commit SHA. Semver build metadata (`+...`) is rejected
+because Docker tags cannot represent it. The image build uses Buildx cache,
+emits an SBOM attestation, and records signed GitHub artifact provenance.
+
 Homebrew Formula tooling is available for deterministic rendering and explicit
 test publishes, but production tap publication is not wired into the release
 workflow yet. Add that integration only after the tap bootstrap and scoped

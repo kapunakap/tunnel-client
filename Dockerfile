@@ -6,7 +6,7 @@ ARG BASE_IMAGE=alpine:3.22
 ARG GIT_SHA=dev
 ARG PROJECT_ROOT=.
 
-FROM ${BASE_UI_BUILDER_IMAGE} AS ui-builder
+FROM --platform=${BUILDPLATFORM} ${BASE_UI_BUILDER_IMAGE} AS ui-builder
 ARG PROJECT_ROOT=.
 ARG PNPM_PACKAGE_MANAGER
 WORKDIR /repo
@@ -50,9 +50,11 @@ RUN --mount=type=secret,id=COREPACK_NPM_REGISTRY \
     && CI=true pnpm --dir adminui install --frozen-lockfile --config.shared-workspace-lockfile=false --config.confirmModulesPurge=false \
     && pnpm --dir adminui build
 
-FROM ${BASE_BUILDER_IMAGE} AS builder
+FROM --platform=${BUILDPLATFORM} ${BASE_BUILDER_IMAGE} AS builder
 ARG PROJECT_ROOT=.
 ARG GIT_SHA=dev
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /go/src/app
 
 COPY ${PROJECT_ROOT}/go.mod ${PROJECT_ROOT}/go.sum ./
@@ -63,14 +65,14 @@ COPY ${PROJECT_ROOT}/ ./
 COPY --from=ui-builder /repo/pkg/adminui/assets ./pkg/adminui/assets
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags "-X github.com/openai/tunnel-client/pkg/version.GitSHA=${GIT_SHA}" \
     -o /usr/local/bin/tunnel-client ./cmd/client
 
-FROM ${BASE_BUILDER_IMAGE} AS cloudflared-builder
+FROM --platform=${BUILDPLATFORM} ${BASE_BUILDER_IMAGE} AS cloudflared-builder
 ARG PROJECT_ROOT=.
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 ARG GOPROXY=https://proxy.golang.org
 ENV GOPROXY=${GOPROXY}
 WORKDIR /repo

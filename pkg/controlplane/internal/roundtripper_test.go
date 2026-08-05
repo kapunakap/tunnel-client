@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/openai/tunnel-client/pkg/clientinstance"
+	"github.com/openai/tunnel-client/pkg/mcpserverinfo"
 	"github.com/openai/tunnel-client/pkg/version"
 )
 
@@ -23,15 +25,16 @@ func TestControlPlaneRoundTripperAddsDefaultHeaders(t *testing.T) {
 	t.Parallel()
 
 	const (
-		apiKey    = "test-api-key"
-		userAgent = "test-user-agent"
+		apiKey     = "test-api-key"
+		userAgent  = "test-user-agent"
+		serverInfo = `{"version":1,"channels":[{"name":"main","proc_affinity":true},{"name":"harpoon","proc_affinity":true}]}`
 	)
 
 	var seen http.Header
 	rt := newControlPlaneRoundTripper(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		seen = req.Header.Clone()
 		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
-	}), apiKey, userAgent, "", map[string]string{"extra-header": "true"}, newDiscardLogger())
+	}), apiKey, userAgent, "", staticMCPServerInfoHeader(serverInfo), map[string]string{"extra-header": "true"}, newDiscardLogger())
 
 	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if !assert.NoError(t, err, "build request") {
@@ -49,6 +52,7 @@ func TestControlPlaneRoundTripperAddsDefaultHeaders(t *testing.T) {
 	assert.Equal(t, version.ClientName, seen.Get(headerTunnelClientName), "expected tunnel client name header to be set")
 	assert.Equal(t, version.Version, seen.Get(headerTunnelClientVersion), "expected tunnel client version header to be set")
 	assert.Equal(t, clientinstance.ID(), seen.Get(clientinstance.HeaderName), "expected tunnel client instance ID header to be set")
+	assert.Equal(t, serverInfo, seen.Get(mcpserverinfo.HeaderName), "expected MCP server info header to be set")
 	assert.Equal(t, "true", seen.Get("extra-header"), "expected extra header to be forwarded")
 }
 
@@ -61,7 +65,7 @@ func TestControlPlaneRoundTripperAddsOrganizationHeader(t *testing.T) {
 	rt := newControlPlaneRoundTripper(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		seen = req.Header.Clone()
 		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
-	}), "api-key", "ua", organizationID, map[string]string{"openai-organization": "org-extra"}, newDiscardLogger())
+	}), "api-key", "ua", organizationID, nil, map[string]string{"openai-organization": "org-extra"}, newDiscardLogger())
 
 	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if !assert.NoError(t, err, "build request") {
@@ -81,7 +85,7 @@ func TestControlPlaneRoundTripperWarnsOnOverride(t *testing.T) {
 
 	rt := newControlPlaneRoundTripper(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
-	}), "api-key", "ua", "", map[string]string{"X-Debug": "new"}, logger)
+	}), "api-key", "ua", "", nil, map[string]string{"X-Debug": "new"}, logger)
 
 	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if !assert.NoError(t, err, "build request") {
@@ -101,14 +105,16 @@ func TestControlPlaneRoundTripperPreservesProtectedHeaders(t *testing.T) {
 
 	handler := &warnCaptureHandler{}
 	logger := slog.New(handler)
+	const serverInfo = `{"version":1,"channels":[{"name":"main"}]}`
 
 	rt := newControlPlaneRoundTripper(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
-	}), "api-key", "ua", "", map[string]string{
-		"authorization":           "Bearer attacker",
-		"User-Agent":              "custom-agent",
-		headerTunnelClientVersion: "dev",
-		clientinstance.HeaderName: "configured-id",
+	}), "api-key", "ua", "", staticMCPServerInfoHeader(serverInfo), map[string]string{
+		"authorization":            "Bearer attacker",
+		"User-Agent":               "custom-agent",
+		headerTunnelClientVersion:  "dev",
+		clientinstance.HeaderName:  "configured-id",
+		"x-tunnel-mcp-server-info": `{"version":1,"channels":[{"name":"attacker"}]}`,
 	}, logger)
 
 	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
@@ -123,6 +129,7 @@ func TestControlPlaneRoundTripperPreservesProtectedHeaders(t *testing.T) {
 	assert.Equal(t, "ua", req.Header.Get("User-Agent"), "expected User-Agent to be preserved")
 	assert.Equal(t, version.Version, req.Header.Get(headerTunnelClientVersion), "expected client version to be preserved")
 	assert.Equal(t, clientinstance.ID(), req.Header.Get(clientinstance.HeaderName), "expected client instance ID to be preserved")
+	assert.Equal(t, serverInfo, req.Header.Get(mcpserverinfo.HeaderName), "expected MCP server info to be preserved")
 }
 
 func TestControlPlaneRoundTripperNoWarningWhenValueMatches(t *testing.T) {
@@ -133,7 +140,7 @@ func TestControlPlaneRoundTripperNoWarningWhenValueMatches(t *testing.T) {
 
 	rt := newControlPlaneRoundTripper(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
-	}), "api-key", "ua", "", map[string]string{"X-Same": "same"}, logger)
+	}), "api-key", "ua", "", nil, map[string]string{"X-Same": "same"}, logger)
 
 	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if !assert.NoError(t, err, "build request") {
@@ -147,6 +154,27 @@ func TestControlPlaneRoundTripperNoWarningWhenValueMatches(t *testing.T) {
 	assert.Equal(t, "same", req.Header.Get("X-Same"))
 }
 
+func TestControlPlaneRoundTripperRejectsInvalidMCPServerInfo(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	rt := newControlPlaneRoundTripper(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+	}), "api-key", "ua", "", func() (string, error) {
+		return "", errors.New("invalid declaration")
+	}, nil, newDiscardLogger())
+
+	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if !assert.NoError(t, err, "build request") {
+		return
+	}
+
+	_, err = rt.RoundTrip(req)
+	assert.ErrorContains(t, err, "MCP server info: invalid declaration")
+	assert.False(t, called, "invalid MCP server info must not reach the network")
+}
+
 func TestNewControlPlaneRoundTripperPanicsOnNilLogger(t *testing.T) {
 	t.Parallel()
 
@@ -155,7 +183,13 @@ func TestNewControlPlaneRoundTripperPanicsOnNilLogger(t *testing.T) {
 		func() {
 			_ = newControlPlaneRoundTripper(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
-			}), "api-key", "ua", "", nil, nil)
+			}), "api-key", "ua", "", nil, nil, nil)
 		},
 	)
+}
+
+func staticMCPServerInfoHeader(value string) func() (string, error) {
+	return func() (string, error) {
+		return value, nil
+	}
 }

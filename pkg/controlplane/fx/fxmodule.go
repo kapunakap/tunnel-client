@@ -3,6 +3,7 @@ package fx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -12,9 +13,12 @@ import (
 	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	"github.com/openai/tunnel-client/pkg/controlplane/internal"
+	"github.com/openai/tunnel-client/pkg/harpoon"
 	tclog "github.com/openai/tunnel-client/pkg/log"
+	"github.com/openai/tunnel-client/pkg/mcpserverinfo"
 	"github.com/openai/tunnel-client/pkg/proxy"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
+	"github.com/openai/tunnel-client/pkg/types"
 )
 
 // Module wires control-plane polling into the Fx graph.
@@ -27,11 +31,13 @@ var Module = fx.Module(
 type fetcherParams struct {
 	fx.In
 
-	Config        *config.ControlPlaneConfig
-	TLSBundle     *tlsconfig.Bundle
-	Logging       *config.LoggingConfig
-	Logger        *slog.Logger
-	MeterProvider *sdkmetric.MeterProvider
+	Config          *config.ControlPlaneConfig
+	MCPConfig       *config.MCPConfig
+	HarpoonRegistry *harpoon.Registry `optional:"true"`
+	TLSBundle       *tlsconfig.Bundle
+	Logging         *config.LoggingConfig
+	Logger          *slog.Logger
+	MeterProvider   *sdkmetric.MeterProvider
 }
 
 type clientResult struct {
@@ -44,8 +50,24 @@ type clientResult struct {
 }
 
 func newTunnelServiceClient(p fetcherParams) (clientResult, error) {
+	if p.Config == nil {
+		return clientResult{}, errors.New("controlplane: control-plane config is required")
+	}
+	var harpoonEnabled func() bool
+	if p.HarpoonRegistry != nil {
+		harpoonEnabled = func() bool {
+			return p.HarpoonRegistry != nil && p.HarpoonRegistry.Count() > 0
+		}
+	}
+	mcpServerInfoHeader, err := newMCPServerInfoHeaderProvider(p.MCPConfig, harpoonEnabled)
+	if err != nil {
+		return clientResult{}, err
+	}
+	controlPlaneConfig := *p.Config
+	controlPlaneConfig.MCPServerInfoHeader = mcpServerInfoHeader
+
 	logger := p.Logger.With(tclog.FieldComponent, tclog.ComponentControlPlane)
-	client, err := internal.NewTunnelServiceClient(context.Background(), p.Config, p.TLSBundle, logger, p.Logging, p.MeterProvider)
+	client, err := internal.NewTunnelServiceClient(context.Background(), &controlPlaneConfig, p.TLSBundle, logger, p.Logging, p.MeterProvider)
 	if err != nil {
 		return clientResult{}, err
 	}
@@ -64,6 +86,90 @@ func newTunnelServiceClient(p fetcherParams) (clientResult, error) {
 		ManagedCloudflareTunnelFetcher: client,
 		Client:                         client,
 	}, nil
+}
+
+func newMCPServerInfoHeaderProvider(mcpConfig *config.MCPConfig, harpoonEnabled func() bool) (func() (string, error), error) {
+	if _, err := buildMCPServerInfoHeader(mcpConfig, false); err != nil {
+		return nil, err
+	}
+	// A registry can gain its first target after startup through OAuth or host
+	// registration. Validate that future enabled shape before any request can
+	// depend on it.
+	if harpoonEnabled != nil {
+		if _, err := buildMCPServerInfoHeader(mcpConfig, true); err != nil {
+			return nil, err
+		}
+	}
+	provider := func() (string, error) {
+		enabled := harpoonEnabled != nil && harpoonEnabled()
+		return buildMCPServerInfoHeader(mcpConfig, enabled)
+	}
+	return provider, nil
+}
+
+func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) (string, error) {
+	if mcpConfig == nil {
+		return "", errors.New("controlplane: MCP config is required")
+	}
+
+	bindings := mcpConfig.ChannelBindings
+	if len(bindings) == 0 {
+		bindings = []config.MCPChannelBinding{{
+			Channel:       types.DefaultChannel,
+			TransportKind: mcpConfig.TransportKind,
+		}}
+	}
+
+	declarations := make([]mcpserverinfo.Declaration, 0, len(bindings)+1)
+	hasMain := false
+	for _, binding := range bindings {
+		if binding.Channel.String() == "" {
+			return "", errors.New("controlplane: build MCP server info: channel name is required")
+		}
+		channel, err := types.NormalizeChannel(binding.Channel.String())
+		if err != nil {
+			return "", fmt.Errorf("controlplane: build MCP server info: %w", err)
+		}
+		processAffinity, err := processAffinityForTransport(binding.TransportKind)
+		if err != nil {
+			return "", err
+		}
+		declarations = append(declarations, mcpserverinfo.Declaration{
+			Name:            channel.String(),
+			ProcessAffinity: processAffinity,
+		})
+		if channel == types.DefaultChannel {
+			hasMain = true
+		}
+	}
+	if !hasMain {
+		return "", errors.New("controlplane: build MCP server info: main channel is required")
+	}
+
+	if harpoonEnabled {
+		// Harpoon is routable only while its registry contains a target, and its
+		// transport is always process-local in-memory state.
+		declarations = append(declarations, mcpserverinfo.Declaration{
+			Name:            types.ChannelHarpoon.String(),
+			ProcessAffinity: true,
+		})
+	}
+	header, err := mcpserverinfo.BuildV1(declarations)
+	if err != nil {
+		return "", fmt.Errorf("controlplane: build MCP server info: %w", err)
+	}
+	return header, nil
+}
+
+func processAffinityForTransport(kind config.MCPTransportKind) (bool, error) {
+	switch kind {
+	case "", config.MCPTransportHTTPStreamable:
+		return false, nil
+	case config.MCPTransportStdio, config.MCPTransportInMemory:
+		return true, nil
+	default:
+		return false, fmt.Errorf("controlplane: build MCP server info: unsupported MCP transport %q", kind)
+	}
 }
 
 type pollerParams struct {

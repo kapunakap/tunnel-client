@@ -435,6 +435,7 @@ func buildControlPlaneHTTPTransportWithLogging(cfg *config.ControlPlaneConfig, t
 		cfg.APIKey,
 		version.UserAgent,
 		cfg.OrganizationID,
+		cfg.MCPServerInfoHeader,
 		extraHeaders,
 		logger,
 	), nil

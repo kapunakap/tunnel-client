@@ -47,6 +47,30 @@ func TestOpenAPIContractSurface(t *testing.T) {
 	assertOperationID(t, spec, "/v1/tunnels/{tunnel_id}/cloudflare/runtime", "get", "getCloudflareRuntime")
 	assertOperationID(t, spec, "/v1/tunnels/{tunnel_id}/poll", "get", "pollTunnelCommands")
 	assertOperationID(t, spec, "/v1/tunnels/{tunnel_id}/response", "post", "postTunnelResponse")
+	const wantMCPServerInfoExample = `{"version":1,"channels":[{"name":"main","proc_affinity":true},{"name":"harpoon","proc_affinity":true}]}`
+	for path, method := range map[string]string{
+		"/v1/tunnels/{tunnel_id}":                    "get",
+		"/v1/tunnels/{tunnel_id}/cloudflare/runtime": "get",
+		"/v1/tunnels/{tunnel_id}/poll":               "get",
+		"/v1/tunnels/{tunnel_id}/response":           "post",
+	} {
+		header := headerParameter(t, operation(t, spec, path, method), "X-Tunnel-MCP-Server-Info")
+		if header["required"] == true {
+			t.Fatalf("%s %s MCP server info header must remain optional", strings.ToUpper(method), path)
+		}
+		schema := mustMap(t, header["schema"], path+".MCPServerInfo.schema")
+		if got := mustString(t, schema["type"], path+".MCPServerInfo.type"); got != "string" {
+			t.Fatalf("%s %s MCP server info type = %q, want string", strings.ToUpper(method), path, got)
+		}
+		if got, ok := schema["maxLength"].(float64); !ok || got != 4096 {
+			t.Fatalf("%s %s MCP server info maxLength = %v, want 4096", strings.ToUpper(method), path, schema["maxLength"])
+		}
+		examples := mustMap(t, header["examples"], path+".MCPServerInfo.examples")
+		example := mustMap(t, examples["stdio-and-harpoon"], path+".MCPServerInfo.examples.stdio-and-harpoon")
+		if got := mustString(t, example["value"], path+".MCPServerInfo.examples.stdio-and-harpoon.value"); got != wantMCPServerInfoExample {
+			t.Fatalf("%s %s MCP server info example = %q, want %q", strings.ToUpper(method), path, got, wantMCPServerInfoExample)
+		}
+	}
 	runtime := operation(t, spec, "/v1/tunnels/{tunnel_id}/cloudflare/runtime", "get")
 	runtimeResponses := mustMap(t, runtime["responses"], "runtime.responses")
 	for _, statusCode := range []string{"200", "400", "401", "404", "500", "503"} {
@@ -536,6 +560,26 @@ func hasRequiredHeader(operation map[string]any, name string) bool {
 		}
 	}
 	return false
+}
+
+func headerParameter(t *testing.T, operation map[string]any, name string) map[string]any {
+	t.Helper()
+
+	parameters, ok := operation["parameters"].([]any)
+	if !ok {
+		t.Fatalf("operation parameters is %T, want array", operation["parameters"])
+	}
+	for _, item := range parameters {
+		parameter, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if parameter["name"] == name && parameter["in"] == "header" {
+			return parameter
+		}
+	}
+	t.Fatalf("operation is missing optional header %q", name)
+	return nil
 }
 
 func schemas(t *testing.T, spec map[string]any) map[string]any {

@@ -167,28 +167,61 @@ func TestCurrentClientHandlesLegacyOrMalformedResponseTimeout(t *testing.T) {
 	}
 }
 
-func TestControlPlaneRequestsSendClientInstanceID(t *testing.T) {
-	const clientInstanceHeader = "X-Tunnel-Client-Instance-Id"
+func TestControlPlaneRequestsSendClientMetadata(t *testing.T) {
+	const (
+		clientInstanceHeader = "X-Tunnel-Client-Instance-Id"
+		serverInfoHeader     = "X-Tunnel-MCP-Server-Info"
+	)
 
-	h := runSimpleToolScenarioWithHarnessOptions(t, nil, nil)
-	requests := h.ControlPlane.ReceivedHTTPRequests()
-	if len(requests) == 0 {
-		t.Fatal("expected control-plane requests")
-	}
+	for _, testCase := range []struct {
+		name           string
+		enableHarpoon  bool
+		wantServerInfo string
+	}{
+		{
+			name:           "remote main without Harpoon",
+			wantServerInfo: `{"version":1,"channels":[{"name":"main"}]}`,
+		},
+		{
+			name:           "remote main with enabled Harpoon",
+			enableHarpoon:  true,
+			wantServerInfo: `{"version":1,"channels":[{"name":"main"},{"name":"harpoon","proc_affinity":true}]}`,
+		},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			var harnessOptions []harnesspkg.HarnessOption
+			if testCase.enableHarpoon {
+				harnessOptions = append(harnessOptions, harnesspkg.WithClientConfig(func(cfg *config.Config) {
+					cfg.Harpoon.Targets = []config.HarpoonTarget{{
+						Label:   "enabled",
+						BaseURL: mustParseURL(t, "https://harpoon.example.com"),
+					}}
+				}))
+			}
 
-	var instanceID string
-	for _, request := range requests {
-		got := request.Headers.Get(clientInstanceHeader)
-		if got == "" {
-			t.Fatalf("control-plane %s %s missing %s", request.Method, request.Path, clientInstanceHeader)
-		}
-		if instanceID == "" {
-			instanceID = got
-			continue
-		}
-		if got != instanceID {
-			t.Fatalf("control-plane %s %s sent %s=%q, want stable process ID %q", request.Method, request.Path, clientInstanceHeader, got, instanceID)
-		}
+			h := runSimpleToolScenarioWithHarnessOptions(t, harnessOptions, nil)
+			requests := h.ControlPlane.ReceivedHTTPRequests()
+			if len(requests) == 0 {
+				t.Fatal("expected control-plane requests")
+			}
+
+			var instanceID string
+			for _, request := range requests {
+				got := request.Headers.Get(clientInstanceHeader)
+				if got == "" {
+					t.Fatalf("control-plane %s %s missing %s", request.Method, request.Path, clientInstanceHeader)
+				}
+				if instanceID == "" {
+					instanceID = got
+				} else if got != instanceID {
+					t.Fatalf("control-plane %s %s sent %s=%q, want stable process ID %q", request.Method, request.Path, clientInstanceHeader, got, instanceID)
+				}
+				if got := request.Headers.Get(serverInfoHeader); got != testCase.wantServerInfo {
+					t.Fatalf("control-plane %s %s sent %s=%q, want %q", request.Method, request.Path, serverInfoHeader, got, testCase.wantServerInfo)
+				}
+			}
+		})
 	}
 }
 

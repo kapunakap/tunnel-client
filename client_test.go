@@ -66,6 +66,16 @@ func TestNewValidatesRequiredInputs(t *testing.T) {
 			wantErr:   "cannot override authentication or client metadata",
 		},
 		{
+			name: "reserved MCP server info header",
+			cfg: tunnelclient.Config{
+				TunnelID:                 testTunnelID,
+				APIKey:                   testAPIKey,
+				ControlPlaneExtraHeaders: map[string]string{"X-Tunnel-MCP-Server-Info": "override"},
+			},
+			transport: clientTransport,
+			wantErr:   "cannot override authentication or client metadata",
+		},
+		{
 			name: "conflicting case-variant control plane headers",
 			cfg: tunnelclient.Config{
 				TunnelID: testTunnelID,

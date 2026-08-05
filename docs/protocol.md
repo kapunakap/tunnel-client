@@ -48,6 +48,90 @@ X-Tunnel-Client-Name: example-rust-client
 X-Tunnel-Client-Version: 1.2.3
 ```
 
+### MCP server information
+
+On control-plane requests, clients may send the optional
+`X-Tunnel-MCP-Server-Info` header alongside
+`X-Tunnel-Client-Instance-Id`. The official tunnel-client sends it on tunnel
+metadata, managed Cloudflare runtime, poll, and response requests. The
+declarations reflect the channels enabled when each request is sent, so
+Harpoon appears only after at least one target is registered.
+
+The header value is compact JSON. Version 1 has this exact shape:
+
+```json
+{
+  "version": 1,
+  "channels": [
+    {"name": "main", "proc_affinity": true},
+    {"name": "harpoon", "proc_affinity": true}
+  ]
+}
+```
+
+Version 1 permits only these keys:
+
+| Location | Key | Required | Meaning |
+| --- | --- | --- | --- |
+| Top level | `version` | yes | Integer protocol version; version 1 is the only v1 value. |
+| Top level | `channels` | yes | Array of MCP channel declarations. |
+| Channel | `name` | yes | Canonical channel name, such as `main` or `harpoon`. |
+| Channel | `proc_affinity` | no | When `true`, session work for that channel must stay on one tunnel-client process. |
+
+An omitted `proc_affinity` means `false`; clients serialize false by
+omitting the key rather than sending `"proc_affinity": false`. Channel names
+must be canonical and unique. A v1 header contains at most 32 channel
+declarations and at most 4096 UTF-8 bytes. Clients must reject duplicate,
+non-canonical, invalid, or over-limit declarations before sending them.
+
+The v1 object is deliberately narrow. It must not contain URLs, commands,
+transport details, headers, request or response payloads, secrets, targets, or
+customer IDs.
+
+Affinity declarations describe the effective channel binding:
+
+- A stdio-backed `main` channel uses `"proc_affinity": true`.
+- A remote Streamable HTTP `main` channel omits `proc_affinity`.
+- An enabled built-in in-memory `harpoon` channel uses
+  `"proc_affinity": true` because its session state is process-local.
+  Include it only while Harpoon has at least one registered target; never
+  include target details.
+- Other configured channels use their canonical names and the same transport
+  rule: process-local stdio or in-memory work is true; remote Streamable HTTP
+  omits the key.
+
+For a remote Streamable HTTP main channel without enabled Harpoon, the value
+is:
+
+```json
+{
+  "version": 1,
+  "channels": [
+    {"name": "main"}
+  ]
+}
+```
+
+For a remote Streamable HTTP main channel with enabled Harpoon, the value is:
+
+```json
+{
+  "version": 1,
+  "channels": [
+    {"name": "main"},
+    {"name": "harpoon", "proc_affinity": true}
+  ]
+}
+```
+
+The header is additive metadata. Older tunnel-service versions ignore it, and
+its presence does not change current routing, queueing, Redis, shard-token,
+poll, or response behavior. Version 1 adds no transport field, session scope,
+session capability flag, affinity token, token echo, keyed FIFO lane, body
+field, command, or endpoint. This reader-first client protocol prerequisite
+does not provide service-side lazy-owner/FIFO behavior; that is a separate
+service implementation.
+
 Treat tunnel IDs, request IDs, and shard tokens as opaque strings. Do not parse
 them or infer routing from their contents.
 
@@ -414,6 +498,8 @@ loop:
 
 - Generate or hand-write models from [`openapi.json`](openapi.json).
 - Send bearer auth and stable client name/version headers.
+- Send the optional MCP server information declaration alongside the stable
+  client instance ID on control-plane requests.
 - Use only the canonical plural endpoints.
 - Handle `200` and `204` poll responses.
 - Record one monotonic receipt time before decoding a successful poll response.

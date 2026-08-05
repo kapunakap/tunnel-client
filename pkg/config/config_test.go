@@ -2735,7 +2735,9 @@ func TestBuildControlPlaneExtraHeadersRejectsReservedHeaders(t *testing.T) {
 		{name: "authorization from flag", flagValue: "Authorization: Bearer attacker"},
 		{name: "user agent from flag", flagValue: "User-Agent: custom-agent"},
 		{name: "client version from flag", flagValue: "X-Tunnel-Client-Version: dev"},
+		{name: "MCP server info from flag", flagValue: "X-Tunnel-MCP-Server-Info: attacker"},
 		{name: "authorization from env", envValue: "authorization: Bearer attacker"},
+		{name: "MCP server info from env", envValue: "x-tunnel-mcp-server-info: attacker"},
 	}
 
 	for _, tc := range testCases {
@@ -2902,18 +2904,25 @@ func TestBuildExtraHeadersRejectsInvalidResolvedValues(t *testing.T) {
 func TestValidateFileConfigSyntaxRejectsReservedControlPlaneExtraHeaders(t *testing.T) {
 	t.Parallel()
 
-	err := validateFileConfigSyntax(fileConfig{
-		ControlPlane: fileControlPlaneConfig{
-			ExtraHeaders: map[string]string{
-				"Authorization": "Bearer attacker",
-			},
-		},
-	})
-	if err == nil {
-		t.Fatalf("expected reserved YAML control-plane header to be rejected")
-	}
-	if !strings.Contains(err.Error(), "cannot override control-plane authentication") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, header := range []string{"Authorization", "x-tunnel-mcp-server-info"} {
+		header := header
+		t.Run(header, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateFileConfigSyntax(fileConfig{
+				ControlPlane: fileControlPlaneConfig{
+					ExtraHeaders: map[string]string{
+						header: "attacker",
+					},
+				},
+			})
+			if err == nil {
+				t.Fatalf("expected reserved YAML control-plane header to be rejected")
+			}
+			if !strings.Contains(err.Error(), "cannot override control-plane authentication") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

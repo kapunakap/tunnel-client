@@ -342,7 +342,7 @@ func validateControlPlaneExtraHeaders(headers map[string]string) error {
 		switch strings.ToLower(strings.TrimSpace(name)) {
 		case "":
 			return errors.New("tunnel-client: control-plane extra header name is required")
-		case "accept", "authorization", "user-agent", "x-tunnel-client-name", "x-tunnel-client-version":
+		case "accept", "authorization", "user-agent", "x-tunnel-client-name", "x-tunnel-client-version", "x-tunnel-mcp-server-info":
 			return fmt.Errorf("tunnel-client: control-plane extra header %q cannot override authentication or client metadata", name)
 		}
 	}

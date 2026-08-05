@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/openai/tunnel-client/pkg/clientinstance"
+	"github.com/openai/tunnel-client/pkg/mcpserverinfo"
 	tctransport "github.com/openai/tunnel-client/pkg/transport"
 	"github.com/openai/tunnel-client/pkg/version"
 )
@@ -72,11 +74,12 @@ type controlPlaneRoundTripper struct {
 	apiKey         string
 	userAgent      string
 	organizationID string
+	mcpServerInfo  func() (string, error)
 	extraHeaders   map[string]string
 	logger         *slog.Logger
 }
 
-func newControlPlaneRoundTripper(base http.RoundTripper, apiKey, userAgent, organizationID string, extraHeaders map[string]string, logger *slog.Logger) http.RoundTripper {
+func newControlPlaneRoundTripper(base http.RoundTripper, apiKey, userAgent, organizationID string, mcpServerInfo func() (string, error), extraHeaders map[string]string, logger *slog.Logger) http.RoundTripper {
 	if base == nil {
 		base = tctransport.CloneDefault()
 	}
@@ -88,6 +91,7 @@ func newControlPlaneRoundTripper(base http.RoundTripper, apiKey, userAgent, orga
 		apiKey:         apiKey,
 		userAgent:      userAgent,
 		organizationID: organizationID,
+		mcpServerInfo:  mcpServerInfo,
 		extraHeaders:   extraHeaders,
 		logger:         logger,
 	}
@@ -100,6 +104,15 @@ func (c *controlPlaneRoundTripper) RoundTrip(req *http.Request) (*http.Response,
 	req.Header.Set(headerTunnelClientName, version.ClientName)
 	req.Header.Set(headerTunnelClientVersion, version.Version)
 	req.Header.Set(clientinstance.HeaderName, clientinstance.ID())
+	if c.mcpServerInfo != nil {
+		mcpServerInfo, err := c.mcpServerInfo()
+		if err != nil {
+			return nil, fmt.Errorf("control-plane round tripper: MCP server info: %w", err)
+		}
+		if mcpServerInfo != "" {
+			req.Header.Set(mcpserverinfo.HeaderName, mcpServerInfo)
+		}
+	}
 	c.applyExtraHeaders(req.Context(), req.Header)
 	if c.organizationID != "" {
 		req.Header.Set(headerOpenAIOrganization, c.organizationID)
@@ -134,6 +147,9 @@ func (c *controlPlaneRoundTripper) applyExtraHeaders(ctx context.Context, header
 }
 
 func isProtectedControlPlaneHeader(key string) bool {
+	if strings.EqualFold(strings.TrimSpace(key), mcpserverinfo.HeaderName) {
+		return true
+	}
 	switch http.CanonicalHeaderKey(key) {
 	case "Authorization", "Accept", "User-Agent", headerTunnelClientName, headerTunnelClientVersion, clientinstance.HeaderName:
 		return true

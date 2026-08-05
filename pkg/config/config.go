@@ -183,8 +183,12 @@ type ControlPlaneConfig struct {
 	PollBackoffMax    time.Duration
 	ClientCertificate *tlsconfig.ClientCertificate
 	ExtraHeaders      map[string]string
-	HTTPProxy         *url.URL
-	HTTPProxySource   ProxySource
+	// MCPServerInfoHeader returns metadata generated from effective MCP channel
+	// bindings and sent as a protected control-plane header. It is not
+	// operator-configurable.
+	MCPServerInfoHeader func() (string, error)
+	HTTPProxy           *url.URL
+	HTTPProxySource     ProxySource
 }
 
 // LoggingConfig defines logging behavior for the client.
@@ -1113,7 +1117,7 @@ func validateControlPlaneExtraHeaders(source string, headers map[string]string) 
 
 func isReservedControlPlaneHeader(key string) bool {
 	switch httpHeaderKey := strings.ToLower(strings.TrimSpace(key)); httpHeaderKey {
-	case "authorization", "accept", "user-agent", "x-tunnel-client-name", "x-tunnel-client-version":
+	case "authorization", "accept", "user-agent", "x-tunnel-client-name", "x-tunnel-client-version", "x-tunnel-mcp-server-info":
 		return true
 	default:
 		return false

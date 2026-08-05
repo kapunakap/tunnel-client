@@ -2,8 +2,11 @@ package fx
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,10 +14,209 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
 
+	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	"github.com/openai/tunnel-client/pkg/controlplane/internal"
+	"github.com/openai/tunnel-client/pkg/mcpserverinfo"
 	"github.com/openai/tunnel-client/pkg/types"
 )
+
+func TestBuildMCPServerInfoHeaderAdvertisesEffectiveBindings(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name           string
+		cfg            config.MCPConfig
+		harpoonEnabled bool
+		want           string
+	}{
+		{
+			name:           "stdio main with enabled Harpoon",
+			harpoonEnabled: true,
+			cfg: config.MCPConfig{
+				ChannelBindings: []config.MCPChannelBinding{{
+					Channel:       types.DefaultChannel,
+					TransportKind: config.MCPTransportStdio,
+					Command:       "/private/stdio-command",
+				}},
+			},
+			want: `{"version":1,"channels":[{"name":"main","proc_affinity":true},{"name":"harpoon","proc_affinity":true}]}`,
+		},
+		{
+			name: "remote streamable HTTP main without Harpoon",
+			cfg: config.MCPConfig{
+				ChannelBindings: []config.MCPChannelBinding{{
+					Channel:       types.DefaultChannel,
+					TransportKind: config.MCPTransportHTTPStreamable,
+					ServerURL:     &url.URL{Scheme: "https", Host: "private.example"},
+				}},
+			},
+			want: `{"version":1,"channels":[{"name":"main"}]}`,
+		},
+		{
+			name:           "remote streamable HTTP main with enabled Harpoon",
+			harpoonEnabled: true,
+			cfg: config.MCPConfig{
+				ChannelBindings: []config.MCPChannelBinding{{
+					Channel:       types.DefaultChannel,
+					TransportKind: config.MCPTransportHTTPStreamable,
+				}},
+			},
+			want: `{"version":1,"channels":[{"name":"main"},{"name":"harpoon","proc_affinity":true}]}`,
+		},
+		{
+			name: "legacy in-memory main without Harpoon",
+			cfg: config.MCPConfig{
+				TransportKind: config.MCPTransportInMemory,
+			},
+			want: `{"version":1,"channels":[{"name":"main","proc_affinity":true}]}`,
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := buildMCPServerInfoHeader(&testCase.cfg, testCase.harpoonEnabled)
+			if err != nil {
+				t.Fatalf("buildMCPServerInfoHeader returned error: %v", err)
+			}
+			if got != testCase.want {
+				t.Fatalf("header = %s, want %s", got, testCase.want)
+			}
+			if strings.Contains(got, "private") {
+				t.Fatalf("header leaked transport details: %s", got)
+			}
+		})
+	}
+}
+
+func TestMCPServerInfoHeaderProviderTracksHarpoonEnablement(t *testing.T) {
+	t.Parallel()
+
+	enabled := false
+	provider, err := newMCPServerInfoHeaderProvider(
+		&config.MCPConfig{TransportKind: config.MCPTransportHTTPStreamable},
+		func() bool { return enabled },
+	)
+	if err != nil {
+		t.Fatalf("newMCPServerInfoHeaderProvider returned error: %v", err)
+	}
+
+	got, err := provider()
+	if err != nil {
+		t.Fatalf("provider without Harpoon returned error: %v", err)
+	}
+	if want := `{"version":1,"channels":[{"name":"main"}]}`; got != want {
+		t.Fatalf("provider without Harpoon = %s, want %s", got, want)
+	}
+
+	enabled = true
+	got, err = provider()
+	if err != nil {
+		t.Fatalf("provider with Harpoon returned error: %v", err)
+	}
+	if want := `{"version":1,"channels":[{"name":"main"},{"name":"harpoon","proc_affinity":true}]}`; got != want {
+		t.Fatalf("provider with Harpoon = %s, want %s", got, want)
+	}
+}
+
+func TestMCPServerInfoHeaderProviderReservesFutureHarpoonChannel(t *testing.T) {
+	t.Parallel()
+
+	bindings := make([]config.MCPChannelBinding, 0, mcpserverinfo.MaxChannels)
+	bindings = append(bindings, config.MCPChannelBinding{
+		Channel:       types.DefaultChannel,
+		TransportKind: config.MCPTransportHTTPStreamable,
+	})
+	for index := 1; index < mcpserverinfo.MaxChannels; index++ {
+		bindings = append(bindings, config.MCPChannelBinding{
+			Channel:       types.Channel(fmt.Sprintf("channel_%02d", index)),
+			TransportKind: config.MCPTransportHTTPStreamable,
+		})
+	}
+	cfg := &config.MCPConfig{ChannelBindings: bindings}
+
+	if _, err := newMCPServerInfoHeaderProvider(cfg, func() bool { return false }); err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
+		t.Fatalf("provider with possible Harpoon error = %v, want channel bound error", err)
+	}
+	if _, err := newMCPServerInfoHeaderProvider(cfg, nil); err != nil {
+		t.Fatalf("provider without Harpoon registry returned error: %v", err)
+	}
+}
+
+func TestBuildMCPServerInfoHeaderRejectsInvalidBindings(t *testing.T) {
+	t.Parallel()
+
+	tooMany := make([]config.MCPChannelBinding, 0, mcpserverinfo.MaxChannels)
+	tooMany = append(tooMany, config.MCPChannelBinding{
+		Channel:       types.DefaultChannel,
+		TransportKind: config.MCPTransportHTTPStreamable,
+	})
+	for index := 1; index < mcpserverinfo.MaxChannels; index++ {
+		tooMany = append(tooMany, config.MCPChannelBinding{
+			Channel:       types.Channel(fmt.Sprintf("channel_%02d", index)),
+			TransportKind: config.MCPTransportHTTPStreamable,
+		})
+	}
+
+	testCases := []struct {
+		name           string
+		cfg            config.MCPConfig
+		harpoonEnabled bool
+		wantErr        string
+	}{
+		{
+			name: "duplicate canonical channel",
+			cfg: config.MCPConfig{
+				ChannelBindings: []config.MCPChannelBinding{
+					{Channel: types.DefaultChannel, TransportKind: config.MCPTransportHTTPStreamable},
+					{Channel: types.Channel(" MAIN "), TransportKind: config.MCPTransportStdio},
+				},
+			},
+			wantErr: "duplicate channel declaration",
+		},
+		{
+			name: "invalid channel",
+			cfg: config.MCPConfig{
+				ChannelBindings: []config.MCPChannelBinding{{
+					Channel:       types.Channel("bad/channel"),
+					TransportKind: config.MCPTransportHTTPStreamable,
+				}},
+			},
+			wantErr: "invalid channel",
+		},
+		{
+			name: "unsupported transport",
+			cfg: config.MCPConfig{
+				ChannelBindings: []config.MCPChannelBinding{{
+					Channel:       types.DefaultChannel,
+					TransportKind: config.MCPTransportKind("unknown"),
+				}},
+			},
+			wantErr: "unsupported MCP transport",
+		},
+		{
+			name:           "more than 32 channels with enabled harpoon",
+			cfg:            config.MCPConfig{ChannelBindings: tooMany},
+			harpoonEnabled: true,
+			wantErr:        "exceeds maximum",
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := buildMCPServerInfoHeader(&testCase.cfg, testCase.harpoonEnabled)
+			if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, testCase.wantErr)
+			}
+		})
+	}
+}
 
 func TestRunPollerStartsEvenWhenFetcherBlocks(t *testing.T) {
 	queue := make(controlplane.PolledCommandQueue, 1)

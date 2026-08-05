@@ -343,9 +343,9 @@ tunnel-client profiles add corp-proxy --sample sample_mcp_enterprise_proxy --tun
     case-insensitive. Identical case variants collapse to one header;
     conflicting values and invalid wire values are rejected before startup.
   - Reserved control-plane headers (`Authorization`, `Accept`, `User-Agent`,
-    `X-Tunnel-Client-Name`, `X-Tunnel-Client-Version`, and
-    `X-Tunnel-Client-Instance-Id`) are managed by the client and cannot be
-    overridden by extra headers.
+    `X-Tunnel-Client-Name`, `X-Tunnel-Client-Version`,
+    `X-Tunnel-Client-Instance-Id`, and `X-Tunnel-MCP-Server-Info`) are managed
+    by the client and cannot be overridden by extra headers.
 
 ## TLS trust (custom CA bundle)
 

@@ -35,6 +35,22 @@
             "example": "tunnel_1234abcd"
           },
           {
+            "name": "X-Tunnel-MCP-Server-Info",
+            "in": "header",
+            "required": false,
+            "description": "Optional JSON-encoded v1 declaration of MCP channel process affinity. Version 1 allows only `version`, `channels`, channel `name`, and optional `proc_affinity`; omitted `proc_affinity` means false. Names are canonical and unique, with at most 32 channels and 4096 UTF-8 bytes. The value must not include URLs, commands, transport details, headers, payloads, secrets, targets, or customer IDs. This is additive metadata; older tunnel-service versions ignore it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "examples": {
+              "stdio-and-harpoon": {
+                "summary": "Process-affine stdio main plus built-in Harpoon",
+                "value": "{\"version\":1,\"channels\":[{\"name\":\"main\",\"proc_affinity\":true},{\"name\":\"harpoon\",\"proc_affinity\":true}]}"
+              }
+            }
+          },
+          {
             "name": "X-Tunnel-Client-Name",
             "in": "header",
             "required": false,
@@ -120,6 +136,22 @@
               "title": "Tunnel Id"
             },
             "description": "Opaque tunnel identifier."
+          },
+          {
+            "name": "X-Tunnel-MCP-Server-Info",
+            "in": "header",
+            "required": false,
+            "description": "Optional JSON-encoded v1 declaration of MCP channel process affinity. Version 1 allows only `version`, `channels`, channel `name`, and optional `proc_affinity`; omitted `proc_affinity` means false. Names are canonical and unique, with at most 32 channels and 4096 UTF-8 bytes. The value must not include URLs, commands, transport details, headers, payloads, secrets, targets, or customer IDs. This is additive metadata; older tunnel-service versions ignore it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "examples": {
+              "stdio-and-harpoon": {
+                "summary": "Process-affine stdio main plus built-in Harpoon",
+                "value": "{\"version\":1,\"channels\":[{\"name\":\"main\",\"proc_affinity\":true},{\"name\":\"harpoon\",\"proc_affinity\":true}]}"
+              }
+            }
           },
           {
             "name": "X-Tunnel-Client-Name",
@@ -335,6 +367,22 @@
             "description": "Optional client-requested poll wait timeout in milliseconds"
           },
           {
+            "name": "X-Tunnel-MCP-Server-Info",
+            "in": "header",
+            "required": false,
+            "description": "Optional JSON-encoded v1 declaration of MCP channel process affinity. Version 1 allows only `version`, `channels`, channel `name`, and optional `proc_affinity`; omitted `proc_affinity` means false. Names are canonical and unique, with at most 32 channels and 4096 UTF-8 bytes. The value must not include URLs, commands, transport details, headers, payloads, secrets, targets, or customer IDs. This is additive metadata; older tunnel-service versions ignore it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "examples": {
+              "stdio-and-harpoon": {
+                "summary": "Process-affine stdio main plus built-in Harpoon",
+                "value": "{\"version\":1,\"channels\":[{\"name\":\"main\",\"proc_affinity\":true},{\"name\":\"harpoon\",\"proc_affinity\":true}]}"
+              }
+            }
+          },
+          {
             "name": "X-Tunnel-Client-Name",
             "in": "header",
             "required": false,
@@ -495,6 +543,22 @@
               "title": "Tunnel Id"
             },
             "description": "Opaque tunnel identifier."
+          },
+          {
+            "name": "X-Tunnel-MCP-Server-Info",
+            "in": "header",
+            "required": false,
+            "description": "Optional JSON-encoded v1 declaration of MCP channel process affinity. Version 1 allows only `version`, `channels`, channel `name`, and optional `proc_affinity`; omitted `proc_affinity` means false. Names are canonical and unique, with at most 32 channels and 4096 UTF-8 bytes. The value must not include URLs, commands, transport details, headers, payloads, secrets, targets, or customer IDs. This is additive metadata; older tunnel-service versions ignore it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "examples": {
+              "stdio-and-harpoon": {
+                "summary": "Process-affine stdio main plus built-in Harpoon",
+                "value": "{\"version\":1,\"channels\":[{\"name\":\"main\",\"proc_affinity\":true},{\"name\":\"harpoon\",\"proc_affinity\":true}]}"
+              }
+            }
           },
           {
             "name": "X-Tunnel-Client-Name",

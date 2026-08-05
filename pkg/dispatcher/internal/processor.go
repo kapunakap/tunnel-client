@@ -447,11 +447,32 @@ func (p *mcpProcessor) processJsonRpcCommand(ctx context.Context, logger *slog.L
 		}
 		failure := classifyTunnelFailure(0, err)
 		logger.WarnContext(ctx, "failed to connect to MCP transport", tunnelFailureLogAttrs(failure, classifyTransportErrorKind(0, err))...)
+		status := normalizeTransportStatusCode(0, err)
 		if isNotification {
-			return fmt.Errorf("connect failed: %s", failure.Source)
+			notificationAck := types.NewNotificationAck(channel, status, nil)
+			post := p.postTunnelResponse(ctx, requestID, notificationAck)
+			if post.err != nil {
+				attrs := post.errorAttrs()
+				if errors.Is(post.err, context.DeadlineExceeded) || errors.Is(post.err, context.Canceled) {
+					logger.WarnContext(ctx, "context canceled while posting terminal notification acknowledgement", attrs...)
+				} else {
+					logger.ErrorContext(ctx, "failed to post terminal notification acknowledgement to control plane", attrs...)
+				}
+				return post.err
+			}
+
+			p.metrics.recordCommandLatencies(ctx, p.tunnelID, status, requestKindAttrs, cmd.EnqueuedAt(), cmd.PolledAt(), latencyRecorded)
+			attrs := []any{
+				slog.Int("status_code", status),
+				slog.String("channel", channel.String()),
+				slog.String("rpc_method", req.Method),
+			}
+			attrs = append(attrs, tunnelFailureLogAttrs(failure, classifyTransportErrorKind(0, err))...)
+			attrs = post.appendTunnelServiceRequestIDAttr(attrs)
+			logger.WarnContext(ctx, "dispatcher failed to connect to MCP transport; posted terminal notification acknowledgement to control plane", attrs...)
+			return nil
 		}
 
-		status := normalizeTransportStatusCode(0, err)
 		encodedError, encodeErr := buildTunnelFailureJSONRPCErrorResponse(req, status, failure)
 		if encodeErr != nil {
 			logger.ErrorContext(ctx, "failed to encode MCP error response", slog.String("error", encodeErr.Error()))

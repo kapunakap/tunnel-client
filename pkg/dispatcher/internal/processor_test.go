@@ -1594,6 +1594,161 @@ func TestProcessorConnectFailureReturnsTerminalErrorResponseAndRecordsLatency(t 
 	}
 }
 
+func TestProcessorNotificationConnectFailureReturnsTerminalAckAndRecordsLatency(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		_ = meterProvider.Shutdown(context.Background())
+	})
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	responder := newRecordingResponder()
+	transport := &failingForwardingTransport{err: errors.New("connect failed")}
+
+	processor, err := NewProcessor(processorParams{
+		Logger:          logger,
+		ChannelBindings: newTestChannelBindings(transport),
+		TunnelResponder: responder,
+		MCPConfig:       newTestMCPConfig(t, time.Second),
+		OAuthHTTPClient: &http.Client{},
+		ControlPlaneCfg: newTestControlPlaneConfig(t),
+		MeterProvider:   meterProvider,
+	})
+	require.NoError(t, err)
+
+	enqueuedAt := time.Now().Add(-500 * time.Millisecond)
+	cmd := &fakePolledCommand{
+		id:         types.RequestID("notification-connect-failure"),
+		message:    &jsonrpc.Request{Method: "notifications/initialized"},
+		enqueuedAt: enqueuedAt,
+		polledAt:   enqueuedAt,
+		shardToken: "shard-notification-connect-failure",
+	}
+
+	require.NoError(t, processor.Process(context.Background(), cmd))
+
+	resp := responder.waitForResponse(t)
+	elapsedAtResponseMS := float64(time.Since(enqueuedAt) / time.Millisecond)
+	require.Equal(t, cmd.id, resp.requestID)
+	require.Equal(t, types.ResponseTypeNotificationAcknowledgment, resp.response.Type())
+	require.Equal(t, http.StatusBadGateway, resp.response.ResponseCode())
+	require.Empty(t, resp.response.Payload())
+	require.Empty(t, resp.response.Headers())
+	require.Empty(t, responder.responses, "connect failure must post exactly one terminal acknowledgement")
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	histogram, ok := findHistogram(rm, metricNameCommandEndToEndLatency)
+	require.True(t, ok, "command_end_to_end_latency_milliseconds metric not found")
+	require.Len(t, histogram.DataPoints, 2)
+
+	dpByType := dataPointsByLatencyType(t, histogram.DataPoints)
+
+	enqueuedDP := dpByType["enqueue_to_response"]
+	require.EqualValues(t, 1, enqueuedDP.Count)
+	require.InDelta(t, elapsedAtResponseMS, enqueuedDP.Sum, 250)
+
+	pollDP := dpByType["poll_to_response"]
+	require.EqualValues(t, 1, pollDP.Count)
+	require.Greater(t, pollDP.Sum, 0.0)
+
+	for _, dp := range []metricdata.HistogramDataPoint[float64]{enqueuedDP, pollDP} {
+		requestKind, ok := dp.Attributes.Value(attribute.Key("request_kind"))
+		require.True(t, ok)
+		require.Equal(t, "notification", requestKind.AsString())
+
+		requestMethod, ok := dp.Attributes.Value(attribute.Key("request_method"))
+		require.True(t, ok)
+		require.Equal(t, "notifications/initialized", requestMethod.AsString())
+
+		channel, ok := dp.Attributes.Value(attribute.Key("channel"))
+		require.True(t, ok)
+		require.Equal(t, "main", channel.AsString())
+
+		tunnelID, ok := dp.Attributes.Value(attribute.Key("tunnel_id"))
+		require.True(t, ok)
+		require.Equal(t, "test-tunnel", tunnelID.AsString())
+
+		status, ok := dp.Attributes.Value(attribute.Key("tunnel_service_status"))
+		require.True(t, ok)
+		require.EqualValues(t, http.StatusBadGateway, status.AsInt64())
+	}
+}
+
+func TestProcessorNotificationConnectFailureAckPostErrorIsReturned(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		_ = meterProvider.Shutdown(context.Background())
+	})
+
+	postErr := errors.New("notification acknowledgement post failed")
+	responder := &countingResponder{err: postErr}
+	processor, err := NewProcessor(processorParams{
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ChannelBindings: newTestChannelBindings(&failingForwardingTransport{err: errors.New("connect failed")}),
+		TunnelResponder: responder,
+		MCPConfig:       newTestMCPConfig(t, time.Second),
+		OAuthHTTPClient: &http.Client{},
+		ControlPlaneCfg: newTestControlPlaneConfig(t),
+		MeterProvider:   meterProvider,
+	})
+	require.NoError(t, err)
+
+	cmd := &fakePolledCommand{
+		id:         types.RequestID("notification-connect-post-failure"),
+		message:    &jsonrpc.Request{Method: "notifications/initialized"},
+		enqueuedAt: time.Now(),
+		polledAt:   time.Now(),
+		shardToken: "shard-notification-connect-post-failure",
+	}
+
+	err = processor.Process(context.Background(), cmd)
+	require.ErrorIs(t, err, postErr)
+	require.EqualValues(t, 1, responder.calls.Load())
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	if histogram, ok := findHistogram(rm, metricNameCommandEndToEndLatency); ok {
+		require.Empty(t, histogram.DataPoints, "failed response posts must not record delivery latency")
+	}
+}
+
+func TestProcessorNotificationConnectFailureCanceledContextPostsNothing(t *testing.T) {
+	t.Parallel()
+
+	responder := &countingResponder{}
+	processor, err := NewProcessor(processorParams{
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ChannelBindings: newTestChannelBindings(&failingForwardingTransport{err: errors.New("connect failed")}),
+		TunnelResponder: responder,
+		MCPConfig:       newTestMCPConfig(t, time.Second),
+		OAuthHTTPClient: &http.Client{},
+		ControlPlaneCfg: newTestControlPlaneConfig(t),
+		MeterProvider:   newTestMeterProvider(t),
+	})
+	require.NoError(t, err)
+
+	cmd := &fakePolledCommand{
+		id:         types.RequestID("notification-connect-canceled"),
+		message:    &jsonrpc.Request{Method: "notifications/initialized"},
+		enqueuedAt: time.Now(),
+		polledAt:   time.Now(),
+		shardToken: "shard-notification-connect-canceled",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = processor.Process(ctx, cmd)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, responder.calls.Load())
+}
+
 func TestProcessorRejectsNonRequestJSONRPCMessage(t *testing.T) {
 	t.Parallel()
 

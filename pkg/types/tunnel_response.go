@@ -75,7 +75,7 @@ func NewJSONRPCNotification(channel Channel, response json.RawMessage, code int,
 	}
 }
 
-// NewNotificationAck constructs a TunnelResponse representing a successful
+// NewNotificationAck constructs a TunnelResponse representing a terminal
 // acknowledgement of a JSON-RPC notification (which carries no response body).
 func NewNotificationAck(channel Channel, code int, headers http.Header) *TunnelResponse {
 	return &TunnelResponse{

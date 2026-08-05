@@ -352,6 +352,13 @@ protocol-relevant response-header allowlist in `resp_headers`. This includes MCP
 capability error `-32003` and version error `-32004`; do not replace or decorate
 either with `-32603`.
 
+At the connector boundary, tunnel-service maps every informational `1xx` status
+to `502` because an informational response cannot terminate the request. Among
+final-response statuses, it preserves values recognized by its HTTP runtime,
+maps an unrecognized `2xx` to `200`, and maps any other unrecognized status
+through `599` to `502`. For synthesized target failures, `upstream_status`
+retains the original error status.
+
 Only when no valid MCP error can be recovered may a client synthesize JSON-RPC
 `-32603`. A synthesized failure may carry bounded provenance at
 `error.data.tunnel_failure`:

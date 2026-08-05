@@ -3,6 +3,7 @@ package pluginsbundle
 import (
 	assistantkb "github.com/openai/tunnel-client/docs"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -160,12 +161,9 @@ func isRuntimeOperationPrompt(prompt string) bool {
 }
 
 func containsPluginPrompt(text string, needles ...string) bool {
-	for _, needle := range needles {
-		if strings.Contains(text, needle) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(needles, func(needle string) bool {
+		return strings.Contains(text, needle)
+	})
 }
 
 func containsPluginWord(text string, words ...string) bool {

@@ -340,7 +340,7 @@ func isShellAssignment(arg string) bool {
 	if idx <= 0 {
 		return false
 	}
-	for i := 0; i < idx; i++ {
+	for i := range idx {
 		ch := arg[i]
 		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_' || (i > 0 && ch >= '0' && ch <= '9') {
 			continue

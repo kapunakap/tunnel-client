@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -189,12 +190,9 @@ func isMissingBinaryPrompt(prompt string) bool {
 }
 
 func containsKnowledgeAny(text string, needles ...string) bool {
-	for _, needle := range needles {
-		if strings.Contains(text, needle) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(needles, func(needle string) bool {
+		return strings.Contains(text, needle)
+	})
 }
 
 func Search(prompt string, limit int) []Match {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -383,12 +384,7 @@ func requirePluginContainsAll(t *testing.T, text string, snippets ...string) {
 }
 
 func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, target)
 }
 
 func requirePluginOmitsAll(t *testing.T, text string, snippets ...string) {

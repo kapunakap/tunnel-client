@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,9 +71,7 @@ func (h *captureHandler) LastAttrs() map[string]slog.Value {
 		return nil
 	}
 	attrs := make(map[string]slog.Value, len(h.state.lastAttrs))
-	for key, value := range h.state.lastAttrs {
-		attrs[key] = value
-	}
+	maps.Copy(attrs, h.state.lastAttrs)
 	return attrs
 }
 

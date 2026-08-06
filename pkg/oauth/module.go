@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"time"
 
 	"go.uber.org/fx"
@@ -152,7 +151,7 @@ func logDiscoveredURLs(logger *slog.Logger, bundle hostbus.URLBundle) {
 	fields := make([]any, 0, len(bundle.URLs)*3)
 	for idx, record := range bundle.URLs {
 		fields = append(fields,
-			slog.String(fmt.Sprintf("url_%d", idx), safeURL(record.URL)),
+			slog.String(fmt.Sprintf("url_%d", idx), tclog.RedactURL(record.URL)),
 			slog.String(fmt.Sprintf("role_%d", idx), tagValue(record.Tags, hostbus.TagKeyRole)),
 			slog.String(fmt.Sprintf("desc_%d", idx), record.Description),
 		)
@@ -167,11 +166,4 @@ func tagValue(tags []hostbus.Tag, key hostbus.TagKey) string {
 		}
 	}
 	return ""
-}
-
-func safeURL(u *url.URL) string {
-	if u == nil {
-		return ""
-	}
-	return u.String()
 }

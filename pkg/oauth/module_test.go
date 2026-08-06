@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -35,6 +36,54 @@ func (b *recordingBus) Publish(ctx context.Context, bundle hostbus.URLBundle) er
 }
 
 func (b *recordingBus) Close() error { return nil }
+
+func TestLogDiscoveredURLsRedactsSensitiveURLParts(t *testing.T) {
+	sensitiveURL, err := url.Parse("https://client:credential@auth.internal/oauth/token?client_id=identifier#state=fragment-value")
+	if err != nil {
+		t.Fatalf("parse sensitive url: %v", err)
+	}
+	sensitiveURL.RawFragment = "state%3Dfragment-value"
+	sensitiveOriginal := sensitiveURL.String()
+
+	forceQueryURL, err := url.Parse("https://auth.internal/oauth/authorize?")
+	if err != nil {
+		t.Fatalf("parse force-query url: %v", err)
+	}
+	forceQueryOriginal := forceQueryURL.String()
+
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+	logDiscoveredURLs(logger, hostbus.URLBundle{
+		URLs: []hostbus.URLRecord{
+			{URL: sensitiveURL},
+			{URL: forceQueryURL},
+			{URL: nil},
+		},
+	})
+
+	var logRecord map[string]any
+	if err := json.NewDecoder(&logBuffer).Decode(&logRecord); err != nil {
+		t.Fatalf("decode log record: %v", err)
+	}
+	if got := logRecord["msg"]; got != "OAuth discovery URLs published" {
+		t.Fatalf("unexpected log message: got %v", got)
+	}
+	if got := logRecord["url_0"]; got != "https://auth.internal" {
+		t.Fatalf("unexpected redacted sensitive url: got %v", got)
+	}
+	if got := logRecord["url_1"]; got != "https://auth.internal" {
+		t.Fatalf("unexpected redacted force-query url: got %v", got)
+	}
+	if got := logRecord["url_2"]; got != "" {
+		t.Fatalf("unexpected nil url: got %v", got)
+	}
+	if got := sensitiveURL.String(); got != sensitiveOriginal {
+		t.Fatalf("sensitive url was mutated: got %q want %q", got, sensitiveOriginal)
+	}
+	if got := forceQueryURL.String(); got != forceQueryOriginal {
+		t.Fatalf("force-query url was mutated: got %q want %q", got, forceQueryOriginal)
+	}
+}
 
 func TestOAuthDiscoveryPublishesPRMDBundle(t *testing.T) {
 	mux := http.NewServeMux()

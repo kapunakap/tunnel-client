@@ -63,6 +63,86 @@ func TestFetchOAuthMetadataNoURLs(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestFetchOAuthMetadataRedactsCandidateURLFromLogsAndErrors(t *testing.T) {
+	candidateURL, err := url.Parse(
+		"https://userinfo-value:credential-value@auth.internal/token-path-value?client_id=query-value#state=fragment-value",
+	)
+	require.NoError(t, err)
+	original := candidateURL.String()
+	dialErr := errors.New("dial failed")
+
+	client := &http.Client{
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, dialErr
+		}),
+	}
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+
+	_, _, attempts, fetchErr := FetchOAuthMetadata(
+		context.Background(),
+		client,
+		[]DiscoveryCandidate{{URL: candidateURL, Source: DiscoverySourceWWWAuthenticate}},
+		logger,
+	)
+	require.Error(t, fetchErr)
+	require.ErrorIs(t, fetchErr, dialErr)
+	require.Len(t, attempts, 1)
+	require.Equal(t, original, candidateURL.String())
+
+	for name, value := range map[string]string{
+		"returned error": fetchErr.Error(),
+		"attempt error":  attempts[0].Error,
+		"log output":     logBuffer.String(),
+	} {
+		require.Contains(t, value, "https://auth.internal", name)
+		for _, sensitive := range []string{
+			"userinfo-value",
+			"credential-value",
+			"token-path-value",
+			"query-value",
+			"fragment-value",
+		} {
+			require.NotContains(t, value, sensitive, name)
+		}
+	}
+}
+
+func TestFetchOAuthMetadataRedactsRequestConstructionError(t *testing.T) {
+	candidateURL := &url.URL{
+		Scheme: "https",
+		Host:   "auth.internal",
+		Opaque: "opaque-sensitive-value\n",
+	}
+	original := *candidateURL
+	client := &http.Client{
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("request construction failure must not call the transport")
+			return nil, nil
+		}),
+	}
+
+	_, _, attempts, fetchErr := FetchOAuthMetadata(
+		context.Background(),
+		client,
+		[]DiscoveryCandidate{{URL: candidateURL, Source: DiscoverySourceWWWAuthenticate}},
+		nil,
+	)
+	require.Error(t, fetchErr)
+	require.Len(t, attempts, 1)
+	require.Equal(t, original, *candidateURL)
+
+	for name, value := range map[string]string{
+		"returned error": fetchErr.Error(),
+		"attempt error":  attempts[0].Error,
+	} {
+		require.Contains(t, value, "https://auth.internal", name)
+		require.NotContains(t, value, "opaque-sensitive-value", name)
+	}
+	var urlErr *url.Error
+	require.ErrorAs(t, fetchErr, &urlErr)
+}
+
 func TestFetchOAuthMetadataRetriesOn5xxThenSucceeds(t *testing.T) {
 	t.Parallel()
 

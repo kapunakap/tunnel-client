@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -402,7 +403,7 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataAcceptsIssuerMismatch(t *te
 	defer server.Close()
 
 	authServerURL := server.URL + "/issuer-a"
-	externalIssuer := "https://idp.bigco-example.com/oauth2/aus2jrb9zi4O8hseE0h8"
+	externalIssuer := "https://userinfo-value:credential-value@idp.bigco-example.com/token-path-value?client_id=query-value#state=fragment-value"
 	registrationEndpoint := "https://location-mcp.internal.preproduction.smp.bigco-example.com/register"
 	payload, err := json.Marshal(oauthex.ProtectedResourceMetadata{
 		Resource:             server.URL + "/resource",
@@ -429,6 +430,7 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataAcceptsIssuerMismatch(t *te
 		_, _ = w.Write(metaBody)
 	})
 
+	var logBuffer bytes.Buffer
 	bundle, fetchResult, err := buildURLBundleFromPRMDWithAuthServerMetadata(
 		context.Background(),
 		server.Client(),
@@ -436,7 +438,7 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataAcceptsIssuerMismatch(t *te
 		time.Unix(42, 0).UTC(),
 		mustParseURL(t, server.URL+"/.well-known/oauth-protected-resource"),
 		URLBundleOptions{},
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		slog.New(slog.NewJSONHandler(&logBuffer, nil)),
 	)
 	if err != nil {
 		t.Fatalf("build expanded bundle: %v", err)
@@ -502,6 +504,25 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataAcceptsIssuerMismatch(t *te
 	}
 	if selected.Error != "" {
 		t.Fatalf("did not expect hard error for issuer mismatch, got %q", selected.Error)
+	}
+
+	var logRecord map[string]any
+	if err := json.NewDecoder(&logBuffer).Decode(&logRecord); err != nil {
+		t.Fatalf("decode issuer-mismatch log: %v", err)
+	}
+	if got := logRecord["metadata_issuer"]; got != "https://idp.bigco-example.com" {
+		t.Fatalf("unexpected redacted metadata issuer: got %v", got)
+	}
+	for _, sensitive := range []string{
+		"userinfo-value",
+		"credential-value",
+		"token-path-value",
+		"query-value",
+		"fragment-value",
+	} {
+		if bytes.Contains(logBuffer.Bytes(), []byte(sensitive)) {
+			t.Fatalf("issuer-mismatch log contains %q: %s", sensitive, logBuffer.String())
+		}
 	}
 }
 

@@ -426,7 +426,7 @@ func (s *Server) callTarget(ctx context.Context, params callTargetRequest) (*cal
 		logFields := []any{
 			slog.String("label", label),
 			slog.String("target_label", label),
-			slog.String("url", resolved.String()),
+			slog.String("url", tclog.RedactURL(resolved)),
 			slog.String("method", method),
 			slog.String("error", cause),
 			slog.Int("latency_ms", int(time.Since(start).Milliseconds())),
@@ -436,14 +436,14 @@ func (s *Server) callTarget(ctx context.Context, params callTargetRequest) (*cal
 		}
 		if toolErr != nil && toolErr.redirectURL != "" {
 			logFields = append(logFields,
-				slog.String("redirect_url", toolErr.redirectURL),
+				slog.String("redirect_url", tclog.RedactURLString(toolErr.redirectURL)),
 				slog.String("redirect_reason", toolErr.reason),
 			)
 			if toolErr.redirectMismatchKind != "" {
 				logFields = append(logFields, slog.String("redirect_mismatch_kind", string(toolErr.redirectMismatchKind)))
 			}
 			if toolErr.redirectExpectedURL != "" {
-				logFields = append(logFields, slog.String("redirect_expected_url", toolErr.redirectExpectedURL))
+				logFields = append(logFields, slog.String("redirect_expected_url", tclog.RedactURLString(toolErr.redirectExpectedURL)))
 			}
 			if toolErr.redirectExpectedScheme != "" {
 				logFields = append(logFields, slog.String("redirect_expected_scheme", toolErr.redirectExpectedScheme))
@@ -484,7 +484,7 @@ func (s *Server) callTarget(ctx context.Context, params callTargetRequest) (*cal
 		logger.InfoContext(ctx, "harpoon response read failed",
 			slog.String("label", label),
 			slog.String("target_label", label),
-			slog.String("url", resp.Request.URL.String()),
+			slog.String("url", tclog.RedactURL(resp.Request.URL)),
 			slog.String("method", method),
 			slog.String("error", "response read failed"),
 			slog.Int("latency_ms", int(time.Since(start).Milliseconds())),
@@ -513,7 +513,7 @@ func (s *Server) callTarget(ctx context.Context, params callTargetRequest) (*cal
 		logger.InfoContext(ctx, "harpoon response too large",
 			slog.String("label", label),
 			slog.String("target_label", label),
-			slog.String("url", resp.Request.URL.String()),
+			slog.String("url", tclog.RedactURL(resp.Request.URL)),
 			slog.String("method", method),
 			slog.Int("latency_ms", int(time.Since(start).Milliseconds())),
 			slog.Int("request_bytes", len(bodyBytes)),
@@ -548,7 +548,7 @@ func (s *Server) callTarget(ctx context.Context, params callTargetRequest) (*cal
 	logger.InfoContext(ctx, "harpoon request completed",
 		slog.String("label", label),
 		slog.String("target_label", label),
-		slog.String("url", resp.Request.URL.String()),
+		slog.String("url", tclog.RedactURL(resp.Request.URL)),
 		slog.String("method", method),
 		slog.Int("latency_ms", int(time.Since(start).Milliseconds())),
 		slog.Int("status_code", resp.StatusCode),
@@ -1063,7 +1063,7 @@ func classifyRequestError(err error) string {
 			return te.msg
 		}
 		if te.redirectURL != "" {
-			return fmt.Sprintf("%s: %s not in allow list", te.msg, te.redirectURL)
+			return fmt.Sprintf("%s: %s not in allow list", te.msg, tclog.RedactURLString(te.redirectURL))
 		}
 		return te.msg
 	}

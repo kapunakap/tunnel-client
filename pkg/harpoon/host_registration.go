@@ -119,7 +119,7 @@ func registerHostBundle(bundle hostbus.URLBundle, classifier *hostclassifier.Hos
 		allowed, reason := shouldRegisterURLRecord(record, classifier, oauthPolicy)
 		if !allowed {
 			logger.Info("harpoon host auto-registration skipped: not private",
-				slog.String("url", safeURL(record.URL)),
+				slog.String("url", tclog.RedactURL(record.URL)),
 				slog.String("host", record.URL.Hostname()),
 				slog.String("source", source),
 				slog.String("role", role),
@@ -130,7 +130,7 @@ func registerHostBundle(bundle hostbus.URLBundle, classifier *hostclassifier.Hos
 		baseLabel := buildAutoLabel(record, idx)
 		if baseLabel == "" {
 			logger.Warn("harpoon host auto-registration skipped: empty label",
-				slog.String("url", safeURL(record.URL)),
+				slog.String("url", tclog.RedactURL(record.URL)),
 				slog.String("source", source),
 				slog.String("role", role),
 				slog.String("group", group),
@@ -142,7 +142,7 @@ func registerHostBundle(bundle hostbus.URLBundle, classifier *hostclassifier.Hos
 		if label == "" {
 			logger.Warn("harpoon host auto-registration skipped: no available label",
 				slog.String("base_label", baseLabel),
-				slog.String("url", safeURL(record.URL)),
+				slog.String("url", tclog.RedactURL(record.URL)),
 				slog.String("source", source),
 				slog.String("role", role),
 				slog.String("group", group),
@@ -175,7 +175,7 @@ func registerHostBundle(bundle hostbus.URLBundle, classifier *hostclassifier.Hos
 		if err := registry.RegisterTarget(target); err != nil {
 			logger.Warn("harpoon host auto-registration failed",
 				slog.String("label", label),
-				slog.String("url", safeURL(record.URL)),
+				slog.String("url", tclog.RedactURL(record.URL)),
 				slog.String("source", source),
 				slog.String("role", role),
 				slog.String("group", group),
@@ -186,7 +186,7 @@ func registerHostBundle(bundle hostbus.URLBundle, classifier *hostclassifier.Hos
 		}
 		logger.Info("harpoon host auto-registered",
 			slog.String("label", label),
-			slog.String("url", safeURL(record.URL)),
+			slog.String("url", tclog.RedactURL(record.URL)),
 			slog.String("source", target.Source),
 			slog.String("role", role),
 			slog.String("group", group),
@@ -375,11 +375,4 @@ func sanitizeLabel(raw string) string {
 
 func isLabelStartValid(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
-}
-
-func safeURL(u *url.URL) string {
-	if u == nil {
-		return ""
-	}
-	return u.String()
 }

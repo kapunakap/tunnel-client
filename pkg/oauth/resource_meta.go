@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/openai/tunnel-client/pkg/headerscope"
+	tclog "github.com/openai/tunnel-client/pkg/log"
 	"github.com/openai/tunnel-client/pkg/version"
 )
 
@@ -198,7 +199,10 @@ func tryWWWAuthenticateProbe(
 ) (*url.URL, error) {
 	req, err := http.NewRequestWithContext(ctx, method, serverURL.String(), http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("oauth discovery: build WWW-Authenticate probe %s: %v", method, err)
+		return nil, wrapErrorWithRedactedMessage(
+			fmt.Sprintf("oauth discovery: build WWW-Authenticate probe %s: %s", method, tclog.ErrorForLog(err)),
+			err,
+		)
 	}
 	req = req.WithContext(headerscope.WithMCPDiscovery(req.Context()))
 	req.Header.Set("User-Agent", version.UserAgent)
@@ -207,9 +211,12 @@ func tryWWWAuthenticateProbe(
 	resp, err := client.Do(req)
 	if err != nil {
 		if logger != nil {
-			logger.WarnContext(ctx, "oauth discovery WWW-Authenticate probe failed", slog.String("method", method), slog.String("error", err.Error()))
+			logger.WarnContext(ctx, "oauth discovery WWW-Authenticate probe failed", slog.String("method", method), slog.String("error", tclog.ErrorForLog(err)))
 		}
-		return nil, fmt.Errorf("oauth discovery: WWW-Authenticate probe %s failed: %v", method, err)
+		return nil, wrapErrorWithRedactedMessage(
+			fmt.Sprintf("oauth discovery: WWW-Authenticate probe %s failed: %s", method, tclog.ErrorForLog(err)),
+			err,
+		)
 	}
 	_ = resp.Body.Close()
 
@@ -224,7 +231,10 @@ func tryWWWAuthenticateProbe(
 
 	parsed, err := parseResourceMetadataFromWWWAuthenticate(header)
 	if err != nil {
-		return nil, fmt.Errorf("%s (%s %d)", err.Error(), method, resp.StatusCode)
+		return nil, wrapErrorWithRedactedMessage(
+			fmt.Sprintf("%s (%s %d)", err.Error(), method, resp.StatusCode),
+			err,
+		)
 	}
 
 	return parsed, nil
@@ -238,7 +248,10 @@ func parseResourceMetadataFromWWWAuthenticate(header string) (*url.URL, error) {
 
 	parsed, err := url.Parse(value)
 	if err != nil {
-		return nil, fmt.Errorf("oauth discovery: parse resource_metadata URL: %w", err)
+		return nil, wrapErrorWithRedactedMessage(
+			fmt.Sprintf("oauth discovery: parse resource_metadata URL: %s", tclog.ErrorForLog(err)),
+			err,
+		)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("oauth discovery: resource_metadata must be absolute")

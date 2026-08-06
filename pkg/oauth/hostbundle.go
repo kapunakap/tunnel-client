@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
 	"github.com/openai/tunnel-client/pkg/harpoon/hostbus"
+	tclog "github.com/openai/tunnel-client/pkg/log"
 )
 
 // URLBundleOptions carries optional generic transport hints for discovered URLs.
@@ -255,9 +256,9 @@ func buildAuthServerMetadataURLRecords(
 	if err != nil {
 		if logger != nil {
 			logger.WarnContext(ctx, "oauth auth-server metadata fetch failed",
-				slog.String("issuer", issuerURL.String()),
+				slog.String("issuer", tclog.RedactURL(issuerURL)),
 				slog.Int("auth_server_index", authServerIndex),
-				slog.String("error", err.Error()),
+				slog.String("error", tclog.ErrorForLog(err)),
 			)
 		}
 		return nil, fetchResult
@@ -265,9 +266,9 @@ func buildAuthServerMetadataURLRecords(
 	if logger != nil {
 		if mismatchAttempt := selectedIssuerMismatchAttempt(fetchResult); mismatchAttempt != nil {
 			logger.WarnContext(ctx, "oauth auth-server metadata issuer differs from authorization_servers[0]",
-				slog.String("expected_issuer_url", mismatchAttempt.ExpectedIssuerURL),
-				slog.String("metadata_issuer", mismatchAttempt.MetadataIssuer),
-				slog.String("selected_metadata_url", fetchResult.SelectedURL),
+				slog.String("expected_issuer_url", tclog.RedactURLString(mismatchAttempt.ExpectedIssuerURL)),
+				slog.String("metadata_issuer", tclog.RedactURLString(mismatchAttempt.MetadataIssuer)),
+				slog.String("selected_metadata_url", tclog.RedactURLString(fetchResult.SelectedURL)),
 				slog.Int("auth_server_index", authServerIndex),
 			)
 		}

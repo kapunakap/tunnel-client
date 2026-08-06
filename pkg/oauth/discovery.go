@@ -14,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
 	"github.com/openai/tunnel-client/pkg/headerscope"
+	tclog "github.com/openai/tunnel-client/pkg/log"
 	"github.com/openai/tunnel-client/pkg/types"
 	"github.com/openai/tunnel-client/pkg/version"
 )
@@ -97,6 +98,7 @@ func runOAuthMetadataDiscoveryPass(
 	var lastErr error
 	failureType := discoveryFailureTypeTimeoutOnly
 	for i, candidate := range filtered {
+		urlForLog := tclog.RedactURL(candidate.URL)
 		attempts[i].Tried = true
 		attempts[i].Selected = false
 		attempts[i].StatusCode = 0
@@ -104,8 +106,11 @@ func runOAuthMetadataDiscoveryPass(
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, candidate.URL.String(), nil)
 		if err != nil {
-			lastErr = err
-			attempts[i].Error = err.Error()
+			lastErr = wrapErrorWithRedactedMessage(
+				fmt.Sprintf("oauth discovery GET %s: %s", urlForLog, tclog.ErrorForLog(err)),
+				err,
+			)
+			attempts[i].Error = lastErr.Error()
 			failureType = discoveryFailureTypeNonTimeout
 			continue
 		}
@@ -120,13 +125,16 @@ func runOAuthMetadataDiscoveryPass(
 			resp, err = client.Do(req)
 		}
 		if err != nil {
-			lastErr = fmt.Errorf("oauth discovery GET %s: %w", candidate.URL.String(), err)
+			lastErr = wrapErrorWithRedactedMessage(
+				fmt.Sprintf("oauth discovery GET %s: %s", urlForLog, tclog.ErrorForLog(err)),
+				err,
+			)
 			attempts[i].Error = lastErr.Error()
 			if classifyDiscoveryFailure(err) == discoveryFailureTypeNonTimeout {
 				failureType = discoveryFailureTypeNonTimeout
 			}
 			if logger != nil {
-				logger.WarnContext(ctx, "oauth discovery request failed", slog.String("url", candidate.URL.String()), slog.String("error", err.Error()))
+				logger.WarnContext(ctx, "oauth discovery request failed", slog.String("url", urlForLog), slog.String("error", tclog.ErrorForLog(err)))
 			}
 			continue
 		}
@@ -136,11 +144,11 @@ func runOAuthMetadataDiscoveryPass(
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, protectedResourceMetadataBodyLimitBytes+1))
 		_ = resp.Body.Close()
 		if readErr != nil {
-			lastErr = fmt.Errorf("oauth discovery read %s: %w", candidate.URL.String(), readErr)
+			lastErr = fmt.Errorf("oauth discovery read %s: %w", urlForLog, readErr)
 			attempts[i].Error = lastErr.Error()
 			if (resp.StatusCode == http.StatusNotFound || resp.StatusCode >= 500) && i+1 < len(filtered) {
 				if logger != nil {
-					logger.DebugContext(ctx, "oauth discovery retrying after read failure", slog.String("url", candidate.URL.String()), slog.Int("status", resp.StatusCode))
+					logger.DebugContext(ctx, "oauth discovery retrying after read failure", slog.String("url", urlForLog), slog.Int("status", resp.StatusCode))
 				}
 				continue
 			}
@@ -149,13 +157,13 @@ func runOAuthMetadataDiscoveryPass(
 		if len(body) > protectedResourceMetadataBodyLimitBytes {
 			lastErr = fmt.Errorf(
 				"oauth discovery response body from %s exceeds %d bytes",
-				candidate.URL.String(),
+				urlForLog,
 				protectedResourceMetadataBodyLimitBytes,
 			)
 			attempts[i].Error = lastErr.Error()
 			if (resp.StatusCode == http.StatusNotFound || resp.StatusCode >= 500) && i+1 < len(filtered) {
 				if logger != nil {
-					logger.DebugContext(ctx, "oauth discovery retrying after oversized body", slog.String("url", candidate.URL.String()), slog.Int("status", resp.StatusCode))
+					logger.DebugContext(ctx, "oauth discovery retrying after oversized body", slog.String("url", urlForLog), slog.Int("status", resp.StatusCode))
 				}
 				continue
 			}
@@ -163,11 +171,11 @@ func runOAuthMetadataDiscoveryPass(
 		}
 
 		if len(body) == 0 {
-			lastErr = fmt.Errorf("oauth discovery empty body from %s (status %d)", candidate.URL.String(), resp.StatusCode)
+			lastErr = fmt.Errorf("oauth discovery empty body from %s (status %d)", urlForLog, resp.StatusCode)
 			attempts[i].Error = lastErr.Error()
 			if (resp.StatusCode == http.StatusNotFound || resp.StatusCode >= 500) && i+1 < len(filtered) {
 				if logger != nil {
-					logger.DebugContext(ctx, "oauth discovery retrying after empty body", slog.String("url", candidate.URL.String()), slog.Int("status", resp.StatusCode))
+					logger.DebugContext(ctx, "oauth discovery retrying after empty body", slog.String("url", urlForLog), slog.Int("status", resp.StatusCode))
 				}
 				continue
 			}
@@ -177,20 +185,20 @@ func runOAuthMetadataDiscoveryPass(
 		// Retry on known fallback-friendly statuses.
 		if (resp.StatusCode == http.StatusNotFound || resp.StatusCode >= 500) && i+1 < len(filtered) {
 			if logger != nil {
-				logger.DebugContext(ctx, "oauth discovery received fallback-eligible status, trying next candidate", slog.String("url", candidate.URL.String()), slog.Int("status", resp.StatusCode))
+				logger.DebugContext(ctx, "oauth discovery received fallback-eligible status, trying next candidate", slog.String("url", urlForLog), slog.Int("status", resp.StatusCode))
 			}
-			lastErr = fmt.Errorf("oauth discovery status %d from %s", resp.StatusCode, candidate.URL.String())
+			lastErr = fmt.Errorf("oauth discovery status %d from %s", resp.StatusCode, urlForLog)
 			attempts[i].Error = lastErr.Error()
 			continue
 		}
 
 		if err := validateProtectedResourceMetadata(body); err != nil {
-			lastErr = fmt.Errorf("oauth discovery invalid metadata from %s: %w", candidate.URL.String(), err)
+			lastErr = fmt.Errorf("oauth discovery invalid metadata from %s: %w", urlForLog, err)
 			attempts[i].Error = lastErr.Error()
 			if resp.StatusCode >= 500 && i+1 < len(filtered) {
 				if logger != nil {
 					logger.DebugContext(ctx, "oauth discovery retrying after invalid metadata",
-						slog.String("url", candidate.URL.String()),
+						slog.String("url", urlForLog),
 						slog.Int("status", resp.StatusCode),
 					)
 				}
@@ -239,9 +247,9 @@ func doWithRetryForTimeout(
 		}
 		if logger != nil {
 			logger.DebugContext(ctx, "oauth discovery retrying request after timeout",
-				slog.String("url", baseReq.URL.String()),
+				slog.String("url", tclog.RedactURL(baseReq.URL)),
 				slog.Int("attempt", attempt+1),
-				slog.String("error", err.Error()),
+				slog.String("error", tclog.ErrorForLog(err)),
 			)
 		}
 	}
@@ -258,7 +266,10 @@ func validateProtectedResourceMetadata(body []byte) error {
 	}
 	if len(metadata.AuthorizationServers) > 0 {
 		if _, err := url.Parse(metadata.AuthorizationServers[0]); err != nil {
-			return fmt.Errorf("parse authorization server[0] %q: %w", metadata.AuthorizationServers[0], err)
+			return wrapErrorWithRedactedMessage(
+				fmt.Sprintf("parse authorization server[0]: %s", tclog.ErrorForLog(err)),
+				err,
+			)
 		}
 	}
 	return nil

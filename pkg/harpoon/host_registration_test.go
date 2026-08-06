@@ -1,6 +1,8 @@
 package harpoon
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/url"
@@ -11,6 +13,55 @@ import (
 	"github.com/openai/tunnel-client/pkg/harpoon/hostbus"
 	"github.com/openai/tunnel-client/pkg/harpoon/internal/hostclassifier"
 )
+
+func TestRegisterHostBundleRedactsLoggedURLWithoutMutatingTarget(t *testing.T) {
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+	registry, err := NewRegistry(logger, true, nil)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	classifier := hostclassifier.NewHostClassifier(config.HarpoonHostClassifierConfig{
+		IncludeSuffix:  []string{"internal"},
+		IncludePrivate: false,
+	})
+
+	sensitiveURL := mustParseURLForHostRegistration(
+		t,
+		"https://client:credential@api.internal/v1?client_id=identifier#state",
+	)
+	sensitiveURL.RawFragment = "state"
+	original := sensitiveURL.String()
+	bundle := hostbus.URLBundle{
+		URLs: []hostbus.URLRecord{{URL: sensitiveURL}},
+	}
+
+	if err := registerHostBundle(bundle, classifier, registry, logger); err != nil {
+		t.Fatalf("register bundle: %v", err)
+	}
+
+	target, ok := registry.Lookup("oauth-0")
+	if !ok {
+		t.Fatalf("expected auto-registered label oauth-0")
+	}
+	if got := target.BaseURL.String(); got != original {
+		t.Fatalf("registered target url was mutated: got %q want %q", got, original)
+	}
+
+	var logRecord map[string]any
+	if err := json.NewDecoder(&logBuffer).Decode(&logRecord); err != nil {
+		t.Fatalf("decode log record: %v", err)
+	}
+	if got := logRecord["msg"]; got != "harpoon host auto-registered" {
+		t.Fatalf("unexpected log message: got %v", got)
+	}
+	if got := logRecord["url"]; got != "https://api.internal" {
+		t.Fatalf("unexpected redacted url: got %v", got)
+	}
+	if got := sensitiveURL.String(); got != original {
+		t.Fatalf("source url was mutated: got %q want %q", got, original)
+	}
+}
 
 func TestRegisterHostBundleRespectsClassifier(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

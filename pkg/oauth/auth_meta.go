@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	tclog "github.com/openai/tunnel-client/pkg/log"
 )
 
 // TODO: Replace this local implementation with oauthex.GetAuthServerMeta once
@@ -107,7 +109,10 @@ func FetchAuthServerMetadataWithResult(
 
 	candidates, err := buildAuthServerMetadataCandidateURLs(issuerURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("oauth auth-server metadata: invalid issuer URL %q: %w", issuerURL, err)
+		return nil, nil, wrapErrorWithRedactedMessage(
+			fmt.Sprintf("oauth auth-server metadata: invalid issuer URL: %s", tclog.ErrorForLog(err)),
+			err,
+		)
 	}
 
 	result := &AuthServerMetadataFetchResult{
@@ -128,7 +133,11 @@ func FetchAuthServerMetadataWithResult(
 		}
 	}
 
-	return nil, result, fmt.Errorf("oauth auth-server metadata fetch failed for issuer %q: %w", issuerURL, errors.Join(errs...))
+	return nil, result, fmt.Errorf(
+		"oauth auth-server metadata fetch failed for issuer %q: %w",
+		tclog.RedactURLString(issuerURL),
+		errors.Join(errs...),
+	)
 }
 
 func runFetchAuthServerMetadataPass(
@@ -161,9 +170,12 @@ func runFetchAuthServerMetadataPass(
 			attempt.BodyText = response.BodyText
 		}
 		if err != nil {
-			attempt.Error = err.Error()
+			attempt.Error = tclog.ErrorForLog(err)
 			result.Attempts = append(result.Attempts, attempt)
-			errs = append(errs, fmt.Errorf("%s: %w", candidate.URL, err))
+			errs = append(errs, wrapErrorWithRedactedMessage(
+				fmt.Sprintf("%s: %s", tclog.RedactURLString(candidate.URL), tclog.ErrorForLog(err)),
+				err,
+			))
 			if classifyDiscoveryFailure(err) == discoveryFailureTypeNonTimeout {
 				failureType = discoveryFailureTypeNonTimeout
 			}

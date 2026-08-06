@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	tclog "github.com/openai/tunnel-client/pkg/log"
 )
 
 var labelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
@@ -155,7 +157,7 @@ func (r *Registry) RegisterTarget(target Target) error {
 		return fmt.Errorf("harpoon: duplicate target label %q", label)
 	}
 	if _, exists := r.targetURLKeys[normalized.String()]; exists && r.hasDifferentTransportForURLLocked(normalized, cleanTarget.UnixSocketPath) {
-		return fmt.Errorf("harpoon: duplicate target url %q uses a different transport", normalized.String())
+		return fmt.Errorf("harpoon: duplicate target url %q uses a different transport", tclog.RedactURL(normalized))
 	}
 	if len(r.targets) >= r.limit {
 		return fmt.Errorf("harpoon: registry limit %d exceeded", r.limit)
@@ -615,7 +617,7 @@ func (r *Registry) SummarizeTargets() []map[string]string {
 	for _, t := range targets {
 		base := ""
 		if t.BaseURL != nil {
-			base = t.BaseURL.String()
+			base = tclog.RedactURL(t.BaseURL)
 		}
 		out = append(out, map[string]string{
 			"label": t.Label,

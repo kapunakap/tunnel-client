@@ -1,7 +1,10 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -93,6 +96,89 @@ func candidateURLsToStrings(candidates []DiscoveryCandidate) []string {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestTryWWWAuthenticateProbeRedactsURLAndPreservesCause(t *testing.T) {
+	serverURL, err := url.Parse(
+		"https://userinfo-value:credential-value@auth.internal/token-path-value?client_id=query-value#state=fragment-value",
+	)
+	require.NoError(t, err)
+	original := serverURL.String()
+
+	var requestURL string
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			requestURL = req.URL.String()
+			return nil, context.DeadlineExceeded
+		}),
+	}
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+
+	_, probeErr := tryWWWAuthenticateProbe(
+		context.Background(),
+		client,
+		serverURL,
+		logger,
+		http.MethodPost,
+	)
+	require.Error(t, probeErr)
+	require.ErrorIs(t, probeErr, context.DeadlineExceeded)
+	require.Equal(t, original, serverURL.String())
+	require.Equal(t, original, requestURL)
+
+	var logRecord map[string]any
+	require.NoError(t, json.NewDecoder(&logBuffer).Decode(&logRecord))
+	require.Equal(t, "oauth discovery WWW-Authenticate probe failed", logRecord["msg"])
+	logError, ok := logRecord["error"].(string)
+	require.True(t, ok)
+	for name, value := range map[string]string{
+		"returned error": probeErr.Error(),
+		"log error":      logError,
+	} {
+		require.Contains(t, value, "https://auth.internal", name)
+		for _, sensitive := range []string{
+			"userinfo-value",
+			"credential-value",
+			"token-path-value",
+			"query-value",
+			"fragment-value",
+		} {
+			require.NotContains(t, value, sensitive, name)
+		}
+	}
+}
+
+func TestTryWWWAuthenticateProbeRedactsAndPreservesResourceMetadataParseError(t *testing.T) {
+	const sensitiveMetadataURL = "https://userinfo-value:credential-value@auth.internal/%invalid-path-value"
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			header := make(http.Header)
+			header.Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s"`, sensitiveMetadataURL))
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}),
+	}
+	serverURL, err := url.Parse("https://mcp.internal/resource")
+	require.NoError(t, err)
+
+	_, probeErr := tryWWWAuthenticateProbe(
+		context.Background(),
+		client,
+		serverURL,
+		testLogger(),
+		http.MethodPost,
+	)
+	require.Error(t, probeErr)
+	var urlErr *url.Error
+	require.True(t, errors.As(probeErr, &urlErr))
+	require.NotContains(t, probeErr.Error(), "userinfo-value")
+	require.NotContains(t, probeErr.Error(), "credential-value")
+	require.NotContains(t, probeErr.Error(), "invalid-path-value")
 }
 
 func TestParseResourceMetadataFromWWWAuthenticate(t *testing.T) {

@@ -52,6 +52,54 @@ func TestListTargetsDoesNotExposeURLs(t *testing.T) {
 	require.NotContains(t, string(payload), "https://")
 }
 
+func TestCallTargetRedactsURLFromLogsWithoutChangingRequest(t *testing.T) {
+	requestURI := make(chan string, 1)
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestURI <- r.URL.RequestURI()
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(targetServer.Close)
+
+	targetURL := mustParseURL(t, targetServer.URL)
+	targetURL.User = url.UserPassword("userinfo-value", "credential-value")
+	targetURL.Path = "/token-path-value"
+	targetURL.RawQuery = "client_id=query-value"
+	targetURL.Fragment = "fragment-value"
+
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, nil))
+	registry, err := NewRegistry(logger, true, []Target{{Label: "target", BaseURL: targetURL}})
+	require.NoError(t, err)
+	server, err := NewServer(&config.HarpoonConfig{
+		AllowPlaintextHTTP: true,
+		MaxResponseBytes:   1024,
+		MaxRedirects:       5,
+	}, registry, NewCallBuffer(), logger)
+	require.NoError(t, err)
+
+	response, err := server.callTarget(context.Background(), callTargetRequest{
+		Label:  "target",
+		Method: http.MethodGet,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", decodeBody(t, response.BodyBase64))
+	require.Equal(t, "/token-path-value?client_id=query-value", <-requestURI)
+
+	var logRecord map[string]any
+	require.NoError(t, json.NewDecoder(&logBuffer).Decode(&logRecord))
+	require.Equal(t, "harpoon request completed", logRecord["msg"])
+	require.Equal(t, targetServer.URL, logRecord["url"])
+	for _, sensitive := range []string{
+		"userinfo-value",
+		"credential-value",
+		"token-path-value",
+		"query-value",
+		"fragment-value",
+	} {
+		require.NotContains(t, logBuffer.String(), sensitive)
+	}
+}
+
 func TestListTargetsFilters(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry, err := NewRegistry(logger, true, []Target{
@@ -773,7 +821,7 @@ func TestCallTargetRedirectMismatchFieldsAreLogged(t *testing.T) {
 	logOutput := logBuffer.String()
 	require.Contains(t, logOutput, "msg=\"harpoon request failed\"")
 	require.Contains(t, logOutput, "redirect_mismatch_kind=scheme_mismatch_https_to_http")
-	require.Contains(t, logOutput, "redirect_expected_url=https://example.com/.well-known/oauth-authorization-server/")
+	require.Contains(t, logOutput, "redirect_expected_url=https://example.com")
 	require.Contains(t, logOutput, "redirect_expected_scheme=https")
 	require.Contains(t, logOutput, "redirect_actual_scheme=http")
 	require.Contains(t, logOutput, "redirect_reason=\"redirect target not in allow list\"")

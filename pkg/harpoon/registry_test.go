@@ -35,19 +35,24 @@ func TestRegistryRejectsDuplicateLabel(t *testing.T) {
 }
 
 func TestRegistryRejectsDuplicateTargetURL(t *testing.T) {
+	const sensitiveURL = "https://userinfo-value:credential-value@example.com/token-path-value?client_id=query-value#state"
 	registry, err := NewRegistry(discardLogger(), true, []Target{{
 		Label:   "auth",
-		BaseURL: mustURL(t, "https://example.com/auth"),
+		BaseURL: mustURL(t, sensitiveURL),
 	}})
 	require.NoError(t, err)
 
 	err = registry.RegisterTarget(Target{
 		Label:          "auth-unix",
-		BaseURL:        mustURL(t, "https://example.com/auth"),
+		BaseURL:        mustURL(t, sensitiveURL),
 		UnixSocketPath: "/tmp/auth.sock",
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "duplicate target url")
+	require.Contains(t, err.Error(), "https://example.com")
+	for _, sensitive := range []string{"userinfo-value", "credential-value", "token-path-value", "query-value", "state"} {
+		require.NotContains(t, err.Error(), sensitive)
+	}
 }
 
 func TestRegistryRejectsPlaintextWhenDisallowed(t *testing.T) {
@@ -278,7 +283,7 @@ func TestRegistryExplainBlockedRedirectCachesHashForOversizedURL(t *testing.T) {
 }
 
 func TestSummarizeTargets(t *testing.T) {
-	urlA, err := url.Parse("https://example.com/base/")
+	urlA, err := url.Parse("https://client:credential@example.com/base/token-path?client_id=identifier#state")
 	require.NoError(t, err)
 	urlB, err := url.Parse("https://example.org")
 	require.NoError(t, err)
@@ -292,7 +297,7 @@ func TestSummarizeTargets(t *testing.T) {
 	summary := registry.SummarizeTargets()
 
 	require.Equal(t, []map[string]string{
-		{"label": "auth", "url": "https://example.com/base/", "desc": "Auth server"},
+		{"label": "auth", "url": "https://example.com", "desc": "Auth server"},
 		{"label": "idp", "url": "https://example.org", "desc": "Identity"},
 	}, summary)
 }

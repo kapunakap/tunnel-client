@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -389,7 +390,7 @@ func TestFetchAuthServerMetadataWithResultPrefersExactIssuerMatchOverMismatch(t 
 }
 
 func TestFetchAuthServerMetadataRetriesOnlyAfterAllTimeouts(t *testing.T) {
-	issuerURL := "https://issuer.example.com/tenant/v2.0"
+	issuerURL := "https://issuer-user-secret:issuer-password-secret@issuer.example.com/issuer-path-secret?issuer-query-key=issuer-query-secret#issuer-fragment-secret"
 	parsedIssuer, err := url.Parse(issuerURL)
 	if err != nil {
 		t.Fatalf("parse issuer URL: %v", err)
@@ -433,12 +434,60 @@ func TestFetchAuthServerMetadataRetriesOnlyAfterAllTimeouts(t *testing.T) {
 	if calls != expectedCalls {
 		t.Fatalf("unexpected call count: got %d want %d", calls, expectedCalls)
 	}
+	if !errors.Is(fetchErr, context.DeadlineExceeded) {
+		t.Fatalf("expected joined timeout error, got %v", fetchErr)
+	}
+	for _, sensitive := range []string{
+		"issuer-user-secret",
+		"issuer-password-secret",
+		"issuer-path-secret",
+		"issuer-query-key",
+		"issuer-query-secret",
+		"issuer-fragment-secret",
+	} {
+		if strings.Contains(fetchErr.Error(), sensitive) {
+			t.Fatalf("fetch error contains sensitive issuer value %q: %v", sensitive, fetchErr)
+		}
+	}
 	for _, attempt := range result.Attempts {
 		if attempt.Error == "" {
 			t.Fatalf("expected timeout error in attempt %+v", attempt)
 		}
-		if !errors.Is(fetchErr, context.DeadlineExceeded) {
-			t.Fatalf("expected joined timeout error, got %v", fetchErr)
+		for _, sensitive := range []string{
+			"issuer-user-secret",
+			"issuer-password-secret",
+			"issuer-path-secret",
+			"issuer-query-key",
+			"issuer-query-secret",
+			"issuer-fragment-secret",
+		} {
+			if strings.Contains(attempt.Error, sensitive) {
+				t.Fatalf("attempt error contains sensitive issuer value %q: %q", sensitive, attempt.Error)
+			}
+		}
+	}
+}
+
+func TestFetchAuthServerMetadataInvalidIssuerPreservesURLError(t *testing.T) {
+	const issuerURL = "https://invalid-user-secret:invalid-password-secret@issuer.example.com/invalid-path-secret%zz?invalid-query-secret=value#invalid-fragment-secret"
+
+	_, _, fetchErr := FetchAuthServerMetadataWithResult(context.Background(), http.DefaultClient, issuerURL)
+	if fetchErr == nil {
+		t.Fatal("expected invalid issuer error")
+	}
+	var urlErr *url.Error
+	if !errors.As(fetchErr, &urlErr) {
+		t.Fatalf("expected wrapped *url.Error, got %T: %v", fetchErr, fetchErr)
+	}
+	for _, sensitive := range []string{
+		"invalid-user-secret",
+		"invalid-password-secret",
+		"invalid-path-secret",
+		"invalid-query-secret",
+		"invalid-fragment-secret",
+	} {
+		if strings.Contains(fetchErr.Error(), sensitive) {
+			t.Fatalf("invalid issuer error contains sensitive value %q: %v", sensitive, fetchErr)
 		}
 	}
 }

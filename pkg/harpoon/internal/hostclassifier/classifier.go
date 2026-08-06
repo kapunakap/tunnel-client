@@ -52,6 +52,9 @@ func (c *HostClassifier) IsPrivateHost(host string) (bool, string) {
 		return false, ""
 	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if c.includeLoopback && host == "localhost" {
+		return true, "loopback"
+	}
 
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if c.includeLoopback && addr.IsLoopback() {

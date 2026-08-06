@@ -28,6 +28,45 @@ func TestHostClassifierDefaultsPrivateIPs(t *testing.T) {
 	}
 }
 
+func TestHostClassifierTreatsLocalhostAsLoopback(t *testing.T) {
+	t.Parallel()
+
+	classifier := NewHostClassifier(config.HarpoonHostClassifierConfig{
+		IncludeLoopback: true,
+		IncludePrivate:  false,
+	})
+	for _, host := range []string{"localhost", "LOCALHOST", "localhost."} {
+		host := host
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+
+			ok, reason := classifier.IsPrivateHost(host)
+			if !ok {
+				t.Fatalf("expected host %q to be loopback", host)
+			}
+			if reason != "loopback" {
+				t.Fatalf("expected loopback reason for %q, got %q", host, reason)
+			}
+		})
+	}
+
+	disabled := NewHostClassifier(config.HarpoonHostClassifierConfig{
+		IncludeLoopback: false,
+		IncludePrivate:  false,
+	})
+	for _, host := range []string{"localhost", "LOCALHOST", "localhost."} {
+		if ok, reason := disabled.IsPrivateHost(host); ok || reason != "" {
+			t.Fatalf("expected loopback-disabled host %q to be excluded, got (%t, %q)", host, ok, reason)
+		}
+	}
+
+	for _, host := range []string{"notlocalhost", "foo.localhost", "localhost.example"} {
+		if ok, reason := classifier.IsPrivateHost(host); ok || reason != "" {
+			t.Fatalf("expected non-localhost name %q to be excluded, got (%t, %q)", host, ok, reason)
+		}
+	}
+}
+
 func TestHostClassifierSuffixAndRegex(t *testing.T) {
 	classifier := NewHostClassifier(config.HarpoonHostClassifierConfig{
 		IncludeLoopback: false,

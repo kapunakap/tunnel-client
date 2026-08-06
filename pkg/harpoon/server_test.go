@@ -350,8 +350,8 @@ func TestCallTargetUsesDiscoveredOAuthUnixSocket(t *testing.T) {
 	registry, err := NewRegistry(logger, true, nil)
 	require.NoError(t, err)
 	classifier := hostclassifier.NewHostClassifier(config.HarpoonHostClassifierConfig{
-		IncludeSuffix:  []string{"localhost"},
-		IncludePrivate: false,
+		IncludeLoopback: true,
+		IncludePrivate:  false,
 	})
 	require.NoError(t, registerHostBundle(bundle, classifier, registry, logger))
 	for _, label := range []string{

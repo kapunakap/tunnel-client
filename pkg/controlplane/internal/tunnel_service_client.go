@@ -60,6 +60,8 @@ type TunnelServiceClient struct {
 	userAgent                      string
 	pollTimeout                    time.Duration
 	pollGuardrail                  time.Duration
+	pollChannels                   []types.Channel
+	pollChannelsConfigured         bool
 	now                            func() time.Time
 	responseRetryAttempts          int
 	newResponseBackoff             func() *backoff.Backoff
@@ -132,6 +134,8 @@ func NewTunnelServiceClient(ctx context.Context, cfg *config.ControlPlaneConfig,
 		userAgent:                      version.UserAgent,
 		pollTimeout:                    pollTimeout,
 		pollGuardrail:                  pollGuardrail,
+		pollChannels:                   append([]types.Channel(nil), cfg.PollChannels...),
+		pollChannelsConfigured:         cfg.PollChannelsConfigured,
 		now:                            time.Now,
 		responseRetryAttempts:          defaultResponseRetryAttempts,
 		newResponseBackoff:             newControlPlaneBackoff,
@@ -572,6 +576,11 @@ func (c *TunnelServiceClient) Poll(ctx context.Context, limit int) ([]controlpla
 	query := req.URL.Query()
 	query.Set("limit", strconv.Itoa(limit))
 	query.Set("timeout_ms", strconv.FormatInt(pollTimeoutMilliseconds(c.pollTimeout), 10))
+	if c.pollChannelsConfigured {
+		for _, channel := range c.pollChannels {
+			query.Add("channel", channel.String())
+		}
+	}
 	req.URL.RawQuery = query.Encode()
 	receipt := newResponseReceiptRecorder(c.nowTime)
 	req = req.WithContext(contextWithResponseReceiptRecorder(req.Context(), receipt))

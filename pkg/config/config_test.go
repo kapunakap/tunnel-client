@@ -1994,6 +1994,89 @@ func TestLoadRejectsMissingMainChannel(t *testing.T) {
 	}
 }
 
+func TestLoadPollChannelsPrecedenceAndHarpoonOnly(t *testing.T) {
+	args := []string{
+		"--control-plane.tunnel-id", flagTunnelID,
+		"--control-plane.poll-channel", "harpoon",
+		"--harpoon.target", "label=auth,url=https://example.com",
+	}
+	cfg, err := Load(args, lookupEnvMap(map[string]string{
+		"OPENAI_API_KEY":              "key",
+		"CONTROL_PLANE_POLL_CHANNELS": "main",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ControlPlane.PollChannelsConfigured || len(cfg.ControlPlane.PollChannels) != 1 || cfg.ControlPlane.PollChannels[0] != types.ChannelHarpoon {
+		t.Fatalf("unexpected poll channels: %#v", cfg.ControlPlane.PollChannels)
+	}
+	if cfg.MCP.MainChannelBinding() != nil {
+		t.Fatal("harpoon-only config synthesized a main binding")
+	}
+}
+
+func TestLoadPollChannelsEnvSorted(t *testing.T) {
+	cfg, err := Load([]string{"--control-plane.tunnel-id", flagTunnelID, "--mcp.server-url", "https://mcp.example", "--harpoon.target", "label=auth,url=https://example.com"}, lookupEnvMap(map[string]string{
+		"OPENAI_API_KEY":              "key",
+		"CONTROL_PLANE_POLL_CHANNELS": "main,harpoon",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.ControlPlane.PollChannels; len(got) != 2 || got[0] != types.ChannelHarpoon || got[1] != types.DefaultChannel {
+		t.Fatalf("unexpected sorted poll channels: %#v", got)
+	}
+}
+
+func TestLoadMainAndHarpoonPollChannelsAllowOAuthBootstrap(t *testing.T) {
+	cfg, err := Load([]string{"--control-plane.tunnel-id", flagTunnelID, "--mcp.server-url", "https://mcp.example"}, lookupEnvMap(map[string]string{
+		"OPENAI_API_KEY":              "key",
+		"CONTROL_PLANE_POLL_CHANNELS": "main,harpoon",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MCP.AllowNoMain {
+		t.Fatal("main subscription unexpectedly disabled")
+	}
+}
+
+func TestLoadPollChannelsFromYAML(t *testing.T) {
+	path := writeTempConfigFile(t, `
+config_version: 1
+control_plane:
+  tunnel_id: tunnel_0123456789abcdef0123456789abcdef
+  poll_channels: [harpoon, main]
+mcp:
+  server_urls:
+    - channel: main
+      url: https://mcp.example
+harpoon:
+  targets:
+    - label: auth
+      url: https://example.com
+`)
+	cfg, err := Load([]string{"--config", path}, lookupEnvMap(map[string]string{"OPENAI_API_KEY": "key"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.ControlPlane.PollChannels; len(got) != 2 || got[0] != types.ChannelHarpoon || got[1] != types.DefaultChannel {
+		t.Fatalf("unexpected YAML poll channels: %#v", got)
+	}
+}
+
+func TestLoadRejectsInvalidPollChannels(t *testing.T) {
+	for _, value := range []string{"", "main,", "Main", "main,main", "unknown"} {
+		_, err := Load([]string{"--control-plane.tunnel-id", flagTunnelID, "--mcp.server-url", "https://mcp.example"}, lookupEnvMap(map[string]string{
+			"OPENAI_API_KEY":              "key",
+			"CONTROL_PLANE_POLL_CHANNELS": value,
+		}))
+		if err == nil {
+			t.Fatalf("expected %q to fail", value)
+		}
+	}
+}
+
 func TestLoadParsesMCPClientCertificateFlags(t *testing.T) {
 	certPath, keyPath := writeTempClientCertPair(t)
 	args := []string{

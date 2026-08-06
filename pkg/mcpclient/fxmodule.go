@@ -86,6 +86,12 @@ func newMcpClient(p clientParams) (clientOutputs, error) {
 
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "tunnel-client", Version: version.Version}, nil)
 	mainBinding := p.Config.MainChannelBinding()
+	if p.Config.AllowNoMain {
+		// Explicit Harpoon-only clients have no main MCP transport to construct.
+		// Keep the named HTTP client available for Fx consumers; OAuth remains
+		// unreachable because no main channel is registered.
+		return clientOutputs{Client: mcpClient, HTTPClient: &http.Client{}}, nil
+	}
 	if mainBinding == nil {
 		legacyBinding := config.MCPChannelBinding{
 			Channel:        types.DefaultChannel,
@@ -128,6 +134,15 @@ func newMcpClient(p clientParams) (clientOutputs, error) {
 func probeMcpServer(p runnerParams) error {
 	if p.Config == nil {
 		return fmt.Errorf("mcpclient: mcp config is required")
+	}
+	if p.Config.AllowNoMain {
+		if p.ProbeState != nil {
+			p.ProbeState.Set(nil)
+		}
+		if p.Logger != nil {
+			p.Logger.Info("Skipping MCP probe: main channel is not configured")
+		}
+		return nil
 	}
 	transportKind := config.MCPTransportHTTPStreamable
 	if p.Config.TransportKind != "" {

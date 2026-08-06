@@ -33,7 +33,7 @@ const (
 	defaultAcceptHeaderValue = "application/json, text/event-stream"
 )
 
-var requiredProcessorChannels = []types.Channel{
+var legacyRequiredProcessorChannels = []types.Channel{
 	types.DefaultChannel,
 	types.ChannelHarpoon,
 }
@@ -133,9 +133,25 @@ func (c channelConfig) isRoutable() bool {
 	return c.routable()
 }
 
-func missingRequiredChannels(channels map[types.Channel]channelConfig) []types.Channel {
-	missing := make([]types.Channel, 0, len(requiredProcessorChannels))
-	for _, required := range requiredProcessorChannels {
+func requiredProcessorChannels(cfg *config.ControlPlaneConfig) []types.Channel {
+	if cfg != nil && cfg.PollChannelsConfigured {
+		return cfg.PollChannels
+	}
+	return legacyRequiredProcessorChannels
+}
+
+func containsChannel(channels []types.Channel, want types.Channel) bool {
+	for _, channel := range channels {
+		if channel == want {
+			return true
+		}
+	}
+	return false
+}
+
+func missingRequiredChannels(channels map[types.Channel]channelConfig, requiredChannels []types.Channel) []types.Channel {
+	missing := make([]types.Channel, 0, len(requiredChannels))
+	for _, required := range requiredChannels {
 		if _, ok := channels[required]; !ok {
 			missing = append(missing, required)
 		}
@@ -188,7 +204,7 @@ func NewProcessor(p processorParams) (Processor, error) {
 	if transportKind == "" {
 		transportKind = config.MCPTransportHTTPStreamable
 	}
-	if transportKind == config.MCPTransportHTTPStreamable && p.MCPConfig.ServerURL == nil {
+	if transportKind == config.MCPTransportHTTPStreamable && p.MCPConfig.ServerURL == nil && (!p.ControlPlaneCfg.PollChannelsConfigured || containsChannel(p.ControlPlaneCfg.PollChannels, types.DefaultChannel)) {
 		return nil, fmt.Errorf("dispatcher processor: missing MCP server URL")
 	}
 
@@ -197,6 +213,9 @@ func NewProcessor(p processorParams) (Processor, error) {
 		channelName := rawChannelName.Canonical()
 		if channelName == "" {
 			return nil, fmt.Errorf("dispatcher processor: channel name %q is invalid after normalization", rawChannelName)
+		}
+		if p.ControlPlaneCfg.PollChannelsConfigured && !containsChannel(p.ControlPlaneCfg.PollChannels, channelName) {
+			continue
 		}
 		if _, exists := channels[channelName]; exists {
 			return nil, fmt.Errorf("dispatcher processor: duplicate channel %q", channelName)
@@ -220,21 +239,22 @@ func NewProcessor(p processorParams) (Processor, error) {
 		}
 	}
 
-	missing := missingRequiredChannels(channels)
+	required := requiredProcessorChannels(p.ControlPlaneCfg)
+	missing := missingRequiredChannels(channels, required)
 	if len(missing) > 0 {
 		return nil, fmt.Errorf(
 			"dispatcher processor: missing required channels %v (required channels: %v)",
 			channelNames(missing),
-			channelNames(requiredProcessorChannels),
+			channelNames(required),
 		)
 	}
-	for _, channelName := range requiredProcessorChannels {
+	for _, channelName := range required {
 		cfg := channels[channelName]
 		if !cfg.features.supportsMCP {
 			return nil, fmt.Errorf(
 				"dispatcher processor: required channel %q must set supportsMCP=true (required channels: %v)",
 				channelName,
-				channelNames(requiredProcessorChannels),
+				channelNames(required),
 			)
 		}
 	}

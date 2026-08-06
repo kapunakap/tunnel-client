@@ -49,6 +49,7 @@ type fileControlPlaneConfig struct {
 	MaxInFlightRequests   *int              `yaml:"max_inflight_requests"`
 	PollTimeout           *string           `yaml:"poll_timeout"`
 	PollDeadlineGuardrail *string           `yaml:"poll_deadline_guardrail"`
+	PollChannels          []string          `yaml:"poll_channels"`
 	ExtraHeaders          map[string]string `yaml:"extra_headers"`
 }
 
@@ -233,6 +234,9 @@ func (c fileConfig) toEnv(lookupEnv func(string) (string, bool)) (map[string]str
 	setInt(env, "CONTROL_PLANE_MAX_INFLIGHT_REQUESTS", c.ControlPlane.MaxInFlightRequests)
 	setString(env, "CONTROL_PLANE_POLL_TIMEOUT", c.ControlPlane.PollTimeout)
 	setString(env, "CONTROL_PLANE_POLL_DEADLINE_GUARDRAIL", c.ControlPlane.PollDeadlineGuardrail)
+	if c.ControlPlane.PollChannels != nil {
+		env["CONTROL_PLANE_POLL_CHANNELS"] = strings.Join(c.ControlPlane.PollChannels, ",")
+	}
 	if c.ControlPlane.APIKey != nil {
 		apiKey, err := resolveConfigSecretReference("control_plane.api_key", *c.ControlPlane.APIKey, lookupEnv)
 		if err != nil {

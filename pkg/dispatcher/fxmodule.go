@@ -19,7 +19,7 @@ import (
 	"github.com/openai/tunnel-client/pkg/types"
 )
 
-var requiredDispatcherChannels = []types.Channel{
+var legacyRequiredDispatcherChannels = []types.Channel{
 	types.DefaultChannel,
 	types.ChannelHarpoon,
 }
@@ -92,7 +92,7 @@ func newConfiguredChannelBindings(cfg *config.MCPConfig, factory *mcpclient.Chan
 		return configuredChannelBindingsResult{}, fmt.Errorf("dispatcher: channel transport factory is required")
 	}
 	channelBindings := cfg.ChannelBindings
-	if len(channelBindings) == 0 {
+	if len(channelBindings) == 0 && !cfg.AllowNoMain {
 		mainBinding := config.MCPChannelBinding{
 			Channel:       types.DefaultChannel,
 			TransportKind: cfg.TransportKind,
@@ -152,7 +152,8 @@ func newHarpoonChannelBinding(p harpoonChannelBindingParams) dispatcherChannelBi
 type processorChannelBindingsParams struct {
 	fx.In
 
-	Bindings []dispatcherChannelBinding `group:"dispatcher_channel_bindings"`
+	Bindings     []dispatcherChannelBinding `group:"dispatcher_channel_bindings"`
+	ControlPlane *config.ControlPlaneConfig
 }
 
 func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Channel]dispatcherinternal.ChannelBinding, error) {
@@ -163,6 +164,9 @@ func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Ch
 		canonical := binding.Channel.Canonical()
 		if canonical == "" {
 			return nil, fmt.Errorf("dispatcher: channel name %q is invalid after normalization", binding.Channel)
+		}
+		if p.ControlPlane != nil && p.ControlPlane.PollChannelsConfigured && !containsChannel(p.ControlPlane.PollChannels, canonical) {
+			continue
 		}
 		if original, exists := originalByCanonical[canonical]; exists {
 			return nil, fmt.Errorf(
@@ -200,21 +204,22 @@ func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Ch
 		originalByCanonical[canonical] = binding.Channel
 	}
 
-	missing := missingRequiredDispatcherChannels(out)
+	required := requiredDispatcherChannels(p.ControlPlane)
+	missing := missingRequiredDispatcherChannels(out, required)
 	if len(missing) > 0 {
 		return nil, fmt.Errorf(
 			"dispatcher: missing required channels %v (required channels: %v)",
 			channelNames(missing),
-			channelNames(requiredDispatcherChannels),
+			channelNames(required),
 		)
 	}
-	for _, channelName := range requiredDispatcherChannels {
+	for _, channelName := range required {
 		binding := out[channelName]
 		if !binding.SupportsMCP {
 			return nil, fmt.Errorf(
 				"dispatcher: required channel %q must set supportsMCP=true (required channels: %v)",
 				channelName,
-				channelNames(requiredDispatcherChannels),
+				channelNames(required),
 			)
 		}
 	}
@@ -222,9 +227,25 @@ func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Ch
 	return out, nil
 }
 
-func missingRequiredDispatcherChannels(channels map[types.Channel]dispatcherinternal.ChannelBinding) []types.Channel {
-	missing := make([]types.Channel, 0, len(requiredDispatcherChannels))
-	for _, required := range requiredDispatcherChannels {
+func requiredDispatcherChannels(cfg *config.ControlPlaneConfig) []types.Channel {
+	if cfg != nil && cfg.PollChannelsConfigured {
+		return cfg.PollChannels
+	}
+	return legacyRequiredDispatcherChannels
+}
+
+func containsChannel(channels []types.Channel, want types.Channel) bool {
+	for _, channel := range channels {
+		if channel == want {
+			return true
+		}
+	}
+	return false
+}
+
+func missingRequiredDispatcherChannels(channels map[types.Channel]dispatcherinternal.ChannelBinding, requiredChannels []types.Channel) []types.Channel {
+	missing := make([]types.Channel, 0, len(requiredChannels))
+	for _, required := range requiredChannels {
 		if _, ok := channels[required]; !ok {
 			missing = append(missing, required)
 		}

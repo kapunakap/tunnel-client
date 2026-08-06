@@ -59,7 +59,7 @@ func newTunnelServiceClient(p fetcherParams) (clientResult, error) {
 			return p.HarpoonRegistry != nil && p.HarpoonRegistry.Count() > 0
 		}
 	}
-	mcpServerInfoHeader, err := newMCPServerInfoHeaderProvider(p.MCPConfig, harpoonEnabled)
+	mcpServerInfoHeader, err := newMCPServerInfoHeaderProviderForPollChannels(p.MCPConfig, p.Config, harpoonEnabled)
 	if err != nil {
 		return clientResult{}, err
 	}
@@ -88,23 +88,53 @@ func newTunnelServiceClient(p fetcherParams) (clientResult, error) {
 	}, nil
 }
 
-func newMCPServerInfoHeaderProvider(mcpConfig *config.MCPConfig, harpoonEnabled func() bool) (func() (string, error), error) {
-	if _, err := buildMCPServerInfoHeader(mcpConfig, false); err != nil {
-		return nil, err
+func newMCPServerInfoHeaderProviderForPollChannels(mcpConfig *config.MCPConfig, controlPlane *config.ControlPlaneConfig, harpoonEnabled func() bool) (func() (string, error), error) {
+	effectiveConfig := mcpConfigForPollChannels(mcpConfig, controlPlane)
+	harpoonAllowed := controlPlane == nil || !controlPlane.PollChannelsConfigured || containsPollChannel(controlPlane.PollChannels, types.ChannelHarpoon)
+	if len(effectiveConfig.ChannelBindings) > 0 {
+		if _, err := buildMCPServerInfoHeader(effectiveConfig, false); err != nil {
+			return nil, err
+		}
 	}
 	// A registry can gain its first target after startup through OAuth or host
 	// registration. Validate that future enabled shape before any request can
 	// depend on it.
-	if harpoonEnabled != nil {
-		if _, err := buildMCPServerInfoHeader(mcpConfig, true); err != nil {
+	if harpoonEnabled != nil && harpoonAllowed {
+		if _, err := buildMCPServerInfoHeader(effectiveConfig, true); err != nil {
 			return nil, err
 		}
 	}
 	provider := func() (string, error) {
-		enabled := harpoonEnabled != nil && harpoonEnabled()
-		return buildMCPServerInfoHeader(mcpConfig, enabled)
+		enabled := harpoonAllowed && harpoonEnabled != nil && harpoonEnabled()
+		return buildMCPServerInfoHeader(effectiveConfig, enabled)
 	}
 	return provider, nil
+}
+
+func mcpConfigForPollChannels(mcpConfig *config.MCPConfig, controlPlane *config.ControlPlaneConfig) *config.MCPConfig {
+	if mcpConfig == nil || controlPlane == nil || !controlPlane.PollChannelsConfigured {
+		return mcpConfig
+	}
+	filtered := *mcpConfig
+	filtered.ChannelBindings = nil
+	for _, binding := range mcpConfig.ChannelBindings {
+		if containsPollChannel(controlPlane.PollChannels, binding.Channel.Canonical()) {
+			filtered.ChannelBindings = append(filtered.ChannelBindings, binding)
+		}
+	}
+	if !containsPollChannel(controlPlane.PollChannels, types.DefaultChannel) {
+		filtered.AllowNoMain = true
+	}
+	return &filtered
+}
+
+func containsPollChannel(channels []types.Channel, want types.Channel) bool {
+	for _, channel := range channels {
+		if channel == want {
+			return true
+		}
+	}
+	return false
 }
 
 func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) (string, error) {
@@ -113,7 +143,7 @@ func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) 
 	}
 
 	bindings := mcpConfig.ChannelBindings
-	if len(bindings) == 0 {
+	if len(bindings) == 0 && !mcpConfig.AllowNoMain {
 		bindings = []config.MCPChannelBinding{{
 			Channel:       types.DefaultChannel,
 			TransportKind: mcpConfig.TransportKind,
@@ -121,7 +151,6 @@ func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) 
 	}
 
 	declarations := make([]mcpserverinfo.Declaration, 0, len(bindings)+1)
-	hasMain := false
 	for _, binding := range bindings {
 		if binding.Channel.String() == "" {
 			return "", errors.New("controlplane: build MCP server info: channel name is required")
@@ -138,12 +167,6 @@ func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) 
 			Name:            channel.String(),
 			ProcessAffinity: processAffinity,
 		})
-		if channel == types.DefaultChannel {
-			hasMain = true
-		}
-	}
-	if !hasMain {
-		return "", errors.New("controlplane: build MCP server info: main channel is required")
 	}
 
 	if harpoonEnabled {
@@ -153,6 +176,9 @@ func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) 
 			Name:            types.ChannelHarpoon.String(),
 			ProcessAffinity: true,
 		})
+	}
+	if len(declarations) == 0 {
+		return "", errors.New("controlplane: build MCP server info: at least one routable channel is required")
 	}
 	header, err := mcpserverinfo.BuildV1(declarations)
 	if err != nil {

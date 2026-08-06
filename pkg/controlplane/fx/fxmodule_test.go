@@ -96,8 +96,9 @@ func TestMCPServerInfoHeaderProviderTracksHarpoonEnablement(t *testing.T) {
 	t.Parallel()
 
 	enabled := false
-	provider, err := newMCPServerInfoHeaderProvider(
+	provider, err := newMCPServerInfoHeaderProviderForPollChannels(
 		&config.MCPConfig{TransportKind: config.MCPTransportHTTPStreamable},
+		nil,
 		func() bool { return enabled },
 	)
 	if err != nil {
@@ -122,6 +123,39 @@ func TestMCPServerInfoHeaderProviderTracksHarpoonEnablement(t *testing.T) {
 	}
 }
 
+func TestBuildMCPServerInfoHeaderHarpoonOnly(t *testing.T) {
+	t.Parallel()
+	got, err := buildMCPServerInfoHeader(&config.MCPConfig{AllowNoMain: true}, true)
+	if err != nil {
+		t.Fatalf("buildMCPServerInfoHeader returned error: %v", err)
+	}
+	if want := `{"version":1,"channels":[{"name":"harpoon","proc_affinity":true}]}`; got != want {
+		t.Fatalf("header = %s, want %s", got, want)
+	}
+}
+
+func TestMCPServerInfoHeaderProviderFiltersDisabledHarpoon(t *testing.T) {
+	t.Parallel()
+	provider, err := newMCPServerInfoHeaderProviderForPollChannels(
+		&config.MCPConfig{ChannelBindings: []config.MCPChannelBinding{{
+			Channel:       types.DefaultChannel,
+			TransportKind: config.MCPTransportHTTPStreamable,
+		}}},
+		&config.ControlPlaneConfig{PollChannelsConfigured: true, PollChannels: []types.Channel{types.DefaultChannel}},
+		func() bool { return true },
+	)
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	got, err := provider()
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	if want := `{"version":1,"channels":[{"name":"main"}]}`; got != want {
+		t.Fatalf("header = %s, want %s", got, want)
+	}
+}
+
 func TestMCPServerInfoHeaderProviderReservesFutureHarpoonChannel(t *testing.T) {
 	t.Parallel()
 
@@ -138,10 +172,10 @@ func TestMCPServerInfoHeaderProviderReservesFutureHarpoonChannel(t *testing.T) {
 	}
 	cfg := &config.MCPConfig{ChannelBindings: bindings}
 
-	if _, err := newMCPServerInfoHeaderProvider(cfg, func() bool { return false }); err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
+	if _, err := newMCPServerInfoHeaderProviderForPollChannels(cfg, nil, func() bool { return false }); err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
 		t.Fatalf("provider with possible Harpoon error = %v, want channel bound error", err)
 	}
-	if _, err := newMCPServerInfoHeaderProvider(cfg, nil); err != nil {
+	if _, err := newMCPServerInfoHeaderProviderForPollChannels(cfg, nil, nil); err != nil {
 		t.Fatalf("provider without Harpoon registry returned error: %v", err)
 	}
 }

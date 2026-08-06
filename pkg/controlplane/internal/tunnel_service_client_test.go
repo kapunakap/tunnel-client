@@ -94,6 +94,7 @@ func TestTunnelServiceClientPollSuccess(t *testing.T) {
       }
     ]
 }
+
 `
 
 	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +159,42 @@ func TestTunnelServiceClientPollSuccess(t *testing.T) {
 	}
 	assert.Truef(t, cmd.EnqueuedAt().Equal(wantEnqueuedAt), "unexpected enqueued_at: got %s want %s", cmd.EnqueuedAt().Format(time.RFC3339), wantEnqueuedAt.Format(time.RFC3339))
 
+}
+
+func TestTunnelServiceClientPollSerializesConfiguredChannels(t *testing.T) {
+	t.Parallel()
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, []string{"harpoon", "main"}, r.URL.Query()["channel"])
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	client, err := NewTunnelServiceClient(context.Background(), &config.ControlPlaneConfig{
+		BaseURL:                mustParseURL(t, server.URL),
+		TunnelID:               types.TunnelID("cli-tunnel"),
+		APIKey:                 "test-api-key",
+		PollTimeout:            time.Second,
+		PollChannelsConfigured: true,
+		PollChannels:           []types.Channel{types.ChannelHarpoon, types.DefaultChannel},
+	}, nil, newDiscardLogger(), &config.LoggingConfig{}, testMeterProvider)
+	assert.NoError(t, err)
+	_, _, err = client.Poll(context.Background(), 1)
+	assert.NoError(t, err)
+}
+
+func TestTunnelServiceClientPollOmitsUnsetChannels(t *testing.T) {
+	t.Parallel()
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NotContains(t, r.URL.Query(), "channel")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	client, err := NewTunnelServiceClient(context.Background(), &config.ControlPlaneConfig{
+		BaseURL:     mustParseURL(t, server.URL),
+		TunnelID:    types.TunnelID("cli-tunnel"),
+		APIKey:      "test-api-key",
+		PollTimeout: time.Second,
+	}, nil, newDiscardLogger(), &config.LoggingConfig{}, testMeterProvider)
+	assert.NoError(t, err)
+	_, _, err = client.Poll(context.Background(), 1)
+	assert.NoError(t, err)
 }
 
 func TestTunnelServiceClientPollRecordsReceiptBeforeRawLoggingReadsBody(t *testing.T) {

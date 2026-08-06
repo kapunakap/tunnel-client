@@ -160,6 +160,18 @@ X-Tunnel-Client-Name: example-rust-client
 X-Tunnel-Client-Version: 1.2.3
 ```
 
+When an operator explicitly configures poll subscriptions, the client adds one
+repeated `channel` query parameter per sorted allowlist entry, for example:
+
+```http
+GET /v1/tunnels/tunnel_123/poll?channel=harpoon&channel=main&limit=25&timeout_ms=15000 HTTP/1.1
+```
+
+Omitting the allowlist preserves the legacy request above with no `channel`
+parameters. These parameters describe drain subscriptions; they do not replace
+`X-Tunnel-MCP-Server-Info`, which remains capability metadata. End-to-end
+channel isolation also requires a tunnel-service reader/filtering implementation.
+
 `limit` is optional and must be from `1` through `25`. It is a request hint:
 if a successful response contains more commands than requested, process every
 command; do not drop the excess. `timeout_ms` is an optional requested

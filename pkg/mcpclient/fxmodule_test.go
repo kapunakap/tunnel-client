@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +68,80 @@ func TestNewMcpClient_DefaultTransport(t *testing.T) {
 
 	if _, ok := outputs.Transport.(*mcp.StreamableClientTransport); !ok {
 		t.Fatalf("expected raw transport to be *mcp.StreamableClientTransport; got %T", outputs.Transport)
+	}
+}
+
+func TestNewMcpClientLegacyUnixSocket(t *testing.T) {
+	socketFile, err := os.CreateTemp("/tmp", "mcp-client-legacy-*.sock")
+	if err != nil {
+		t.Fatalf("create unix socket temp file: %v", err)
+	}
+	socketPath := socketFile.Name()
+	_ = socketFile.Close()
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+
+	serverURL := mustParseURL(t, "http://localhost/mcp")
+	logging := &config.LoggingConfig{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	params := clientParams{
+		Config: &config.MCPConfig{
+			ServerURL:      serverURL,
+			UnixSocketPath: socketPath,
+		},
+		Logging:          logging,
+		Logger:           logger,
+		MeterProvider:    sdkmetric.NewMeterProvider(),
+		TransportFactory: newTestChannelTransportFactory(t, serverURL, logging, logger),
+	}
+	outputs, err := newMcpClient(params)
+	if err != nil {
+		t.Fatalf("newMcpClient: %v", err)
+	}
+	resp, err := outputs.HTTPClient.Get(serverURL.String())
+	if err != nil {
+		t.Fatalf("legacy unix socket request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected status %d", resp.StatusCode)
+	}
+}
+
+func TestNewMcpClientSkipsConfiguredMainWhenDisabled(t *testing.T) {
+	serverURL := mustParseURL(t, "https://example.invalid")
+	logging := &config.LoggingConfig{}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	params := clientParams{
+		Config: &config.MCPConfig{
+			AllowNoMain: true,
+			ChannelBindings: []config.MCPChannelBinding{{
+				Channel:       types.DefaultChannel,
+				TransportKind: config.MCPTransportHTTPStreamable,
+				ServerURL:     serverURL,
+			}},
+		},
+		Logging:          logging,
+		Logger:           logger,
+		MeterProvider:    sdkmetric.NewMeterProvider(),
+		TransportFactory: newTestChannelTransportFactory(t, serverURL, logging, logger),
+	}
+	outputs, err := newMcpClient(params)
+	if err != nil {
+		t.Fatalf("newMcpClient: %v", err)
+	}
+	if outputs.Transport != nil {
+		t.Fatalf("disabled main created transport %T", outputs.Transport)
 	}
 }
 

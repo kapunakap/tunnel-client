@@ -324,6 +324,18 @@ tunnel-client profiles add corp-proxy --sample sample_mcp_enterprise_proxy --tun
     setting the HTTP/context deadline so a normal `204 No Content` empty poll
     can complete without being classified as a client timeout. Test profiles
     can override it with a smaller millisecond duration such as `500ms`.
+- **Poll channels (optional)**
+  - Flag (repeatable): `--control-plane.poll-channel=main`
+  - Env: `CONTROL_PLANE_POLL_CHANNELS=main,harpoon`
+  - YAML: `control_plane.poll_channels: [main, harpoon]`
+  - Precedence is flags, then environment, then YAML. When omitted, the client
+    preserves legacy unscoped polling and sends no `channel` query parameters.
+  - Once configured, this is an allowlist: omitted channels are disabled. The
+    client rejects blanks, duplicates, non-canonical names, and channels without
+    a local handler. Values are sorted before repeated `channel` query
+    parameters are serialized.
+  - A Harpoon-only client may set only `harpoon` and omit the main MCP binding,
+    but it must configure at least one routable Harpoon target.
 - **Polled-command buffer capacity**
   - Flag: `--control-plane.max-inflight`
   - Env: `CONTROL_PLANE_MAX_INFLIGHT_REQUESTS`

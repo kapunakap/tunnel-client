@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -177,6 +178,11 @@ type ControlPlaneConfig struct {
 	MaxInFlightRequests   int
 	PollTimeout           time.Duration
 	PollDeadlineGuardrail time.Duration
+	// PollChannels is an explicit, sorted allowlist of channels to drain. When
+	// PollChannelsConfigured is false, polling remains wire-compatible with
+	// older clients and sends no channel query parameters.
+	PollChannels           []types.Channel
+	PollChannelsConfigured bool
 	// PollBackoffMin/PollBackoffMax allow overriding the poller's retry window.
 	// Zero values fall back to the internal defaults.
 	PollBackoffMin    time.Duration
@@ -242,13 +248,16 @@ func (c CloudflaredConfig) Enabled() bool {
 // MCPChannelBinding first, then projected to the legacy fields only for
 // compatibility.
 type MCPConfig struct {
-	ServerURL             *url.URL
-	UnixSocketPath        string
-	Command               string
-	CommandArgs           []string
-	TransportKind         MCPTransportKind
-	ClientCertificate     *tlsconfig.ClientCertificate
-	ChannelBindings       []MCPChannelBinding
+	ServerURL         *url.URL
+	UnixSocketPath    string
+	Command           string
+	CommandArgs       []string
+	TransportKind     MCPTransportKind
+	ClientCertificate *tlsconfig.ClientCertificate
+	ChannelBindings   []MCPChannelBinding
+	// AllowNoMain is set only for an explicit poll allowlist that excludes main.
+	// It keeps zero-value MCPConfig compatibility for older callers.
+	AllowNoMain           bool
 	ConnectionMaxTTL      time.Duration
 	MaxConcurrentRequests int
 	ExtraHeaders          map[string]string
@@ -460,6 +469,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Int("control-plane.max-inflight", defaultControlPlaneMaxInFlight, "Capacity of the local polled-command buffer; polling pauses while the buffer is full (env.CONTROL_PLANE_MAX_INFLIGHT_REQUESTS, max 10000)")
 	fs.Duration("control-plane.poll-timeout", defaultControlPlanePollTimeout, "Long-poll timeout when fetching commands from the control plane (env.CONTROL_PLANE_POLL_TIMEOUT)")
 	fs.Duration("control-plane.poll-deadline-guardrail", defaultControlPlanePollDeadlineGuardrail, "Extra time after the requested long-poll wait before the control-plane HTTP/context deadline (env.CONTROL_PLANE_POLL_DEADLINE_GUARDRAIL)")
+	fs.StringArray("control-plane.poll-channel", nil, "Channel to drain from the control plane (repeatable; env.CONTROL_PLANE_POLL_CHANNELS)")
 	fs.StringArray("control-plane.extra-headers", nil, "Additional HTTP headers to send to the tunnel control-plane (format 'Key: Value', repeatable; values accept env:VAR or file:/path) (env.CONTROL_PLANE_EXTRA_HEADERS)")
 	fs.String("log.level", defaultLogLevel, "Log level (debug, info, warn) (env.LOG_LEVEL)")
 	fs.String("log.format", defaultLogFormat.String(), "Log format (struct-text, json) (env.LOG_FORMAT)")
@@ -566,6 +576,10 @@ func LoadFromFlagSet(fs *pflag.FlagSet, lookupEnv func(string) (string, bool)) (
 	if err != nil {
 		return nil, err
 	}
+	if err := validateConfiguredPollChannels(controlPlane, mcp, harpoon); err != nil {
+		return nil, err
+	}
+	mcp.AllowNoMain = controlPlane.PollChannelsConfigured && !containsPollChannel(controlPlane.PollChannels, types.DefaultChannel)
 
 	proxyHealth, err := buildProxyHealthConfig(fs, lookupEnv)
 	if err != nil {
@@ -964,6 +978,10 @@ func buildControlPlaneConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, 
 	if err := validateControlPlanePollTiming(pollTimeout, pollDeadlineGuardrail); err != nil {
 		return ControlPlaneConfig{}, err
 	}
+	pollChannels, pollChannelsConfigured, err := resolvePollChannels(fs, lookupEnv)
+	if err != nil {
+		return ControlPlaneConfig{}, err
+	}
 
 	var apiKeyFlagValue string
 	if flag := fs.Lookup("control-plane.api-key"); flag != nil && flag.Changed {
@@ -989,19 +1007,101 @@ func buildControlPlaneConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, 
 	}
 
 	return ControlPlaneConfig{
-		BaseURL:               baseURL,
-		URLPath:               controlPlaneURLPath,
-		TunnelID:              types.TunnelID(tunnelID),
-		OrganizationID:        organizationID,
-		APIKey:                apiKey,
-		MaxInFlightRequests:   maxInFlight,
-		PollTimeout:           pollTimeout,
-		PollDeadlineGuardrail: pollDeadlineGuardrail,
-		ClientCertificate:     clientCertificate,
-		ExtraHeaders:          extraHeaders,
-		HTTPProxy:             httpProxy,
-		HTTPProxySource:       httpProxySource,
+		BaseURL:                baseURL,
+		URLPath:                controlPlaneURLPath,
+		TunnelID:               types.TunnelID(tunnelID),
+		OrganizationID:         organizationID,
+		APIKey:                 apiKey,
+		MaxInFlightRequests:    maxInFlight,
+		PollTimeout:            pollTimeout,
+		PollDeadlineGuardrail:  pollDeadlineGuardrail,
+		PollChannels:           pollChannels,
+		PollChannelsConfigured: pollChannelsConfigured,
+		ClientCertificate:      clientCertificate,
+		ExtraHeaders:           extraHeaders,
+		HTTPProxy:              httpProxy,
+		HTTPProxySource:        httpProxySource,
 	}, nil
+}
+
+func resolvePollChannels(fs *pflag.FlagSet, lookupEnv func(string) (string, bool)) ([]types.Channel, bool, error) {
+	var raw []string
+	if flag := fs.Lookup("control-plane.poll-channel"); flag != nil && flag.Changed {
+		values, err := fs.GetStringArray("control-plane.poll-channel")
+		if err != nil {
+			return nil, true, fmt.Errorf("invalid value for --control-plane.poll-channel: %w", err)
+		}
+		raw = values
+	} else if value, ok := lookupEnv("CONTROL_PLANE_POLL_CHANNELS"); ok {
+		raw = strings.Split(value, ",")
+	} else {
+		return nil, false, nil
+	}
+	if len(raw) == 0 {
+		return nil, true, errors.New("control-plane.poll-channel must contain at least one channel")
+	}
+	seen := make(map[types.Channel]struct{}, len(raw))
+	channels := make([]types.Channel, 0, len(raw))
+	for _, value := range raw {
+		if value == "" || strings.TrimSpace(value) == "" {
+			return nil, true, errors.New("control-plane.poll-channel contains an empty channel")
+		}
+		channel, err := types.NormalizeChannel(value)
+		if err != nil {
+			return nil, true, fmt.Errorf("invalid control-plane.poll-channel %q: %w", value, err)
+		}
+		if channel.String() != value {
+			return nil, true, fmt.Errorf("control-plane.poll-channel %q is not canonical; use %q", value, channel)
+		}
+		if _, ok := seen[channel]; ok {
+			return nil, true, fmt.Errorf("duplicate control-plane.poll-channel %q", channel)
+		}
+		seen[channel] = struct{}{}
+		channels = append(channels, channel)
+	}
+	sort.Slice(channels, func(i, j int) bool { return channels[i] < channels[j] })
+	return channels, true, nil
+}
+
+func validateConfiguredPollChannels(controlPlane ControlPlaneConfig, mcp MCPConfig, harpoon HarpoonConfig) error {
+	if !controlPlane.PollChannelsConfigured {
+		if mcp.MainChannelBinding() == nil {
+			if len(mcp.ChannelBindings) > 0 {
+				return errors.New("main channel is required; add channel=main to one --mcp.server-url or --mcp.command entry")
+			}
+			return errors.New("main channel is required; set --mcp.server-url or --mcp.command, or MCP_SERVER_URL or MCP_COMMAND")
+		}
+		return nil
+	}
+	for _, channel := range controlPlane.PollChannels {
+		switch channel {
+		case types.DefaultChannel:
+			if mcp.MainChannelBinding() == nil {
+				return errors.New("control-plane.poll-channel main has no local MCP handler")
+			}
+		case types.ChannelHarpoon:
+			// Main can discover and register Harpoon targets through OAuth after
+			// startup. A true Harpoon-only process has no such bootstrap path and
+			// must fail closed unless it starts with a routable target.
+			if len(harpoon.Targets) == 0 && !containsPollChannel(controlPlane.PollChannels, types.DefaultChannel) {
+				return errors.New("control-plane.poll-channel harpoon has no routable target")
+			}
+		default:
+			if mcp.ChannelBindingFor(channel) == nil {
+				return fmt.Errorf("control-plane.poll-channel %q has no local handler", channel)
+			}
+		}
+	}
+	return nil
+}
+
+func containsPollChannel(channels []types.Channel, want types.Channel) bool {
+	for _, channel := range channels {
+		if channel == want {
+			return true
+		}
+	}
+	return false
 }
 
 func validateControlPlanePollTiming(pollTimeout, pollDeadlineGuardrail time.Duration) error {
@@ -1772,12 +1872,6 @@ func parseMCPChannelBindings(commandEntries, serverEntries []string, lookupEnv f
 		}
 	}
 
-	if len(bindings) == 0 {
-		return nil, errors.New("main channel is required; set --mcp.server-url or --mcp.command, or MCP_SERVER_URL or MCP_COMMAND")
-	}
-	if _, ok := seen[types.DefaultChannel]; !ok {
-		return nil, errors.New("main channel is required; add channel=main to one --mcp.server-url or --mcp.command entry")
-	}
 	return bindings, nil
 }
 

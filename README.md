@@ -243,7 +243,8 @@ a token-free production config and keep the token in a separate secret file:
 tunnel-client cloudflared config \
   --token-file /run/secrets/cloudflared/token \
   > /etc/cloudflared/config.yml
-cloudflared tunnel --config /etc/cloudflared/config.yml run
+TUNNEL_MANAGEMENT_DIAGNOSTICS=false \
+  cloudflared tunnel --config /etc/cloudflared/config.yml run
 ```
 
 Fastest Codex terminal path:

@@ -229,6 +229,27 @@ func TestSupervisorSurfacesUnexpectedExitAfterReady(t *testing.T) {
 	require.NoError(t, supervisor.Stop(stopCtx))
 }
 
+func TestSupervisorForcesManagementDiagnosticsOffInChild(t *testing.T) {
+	t.Setenv("GO_WANT_CLOUDFLARED_HELPER", "1")
+	t.Setenv("CLOUDFLARED_HELPER_MODE", "ready")
+	t.Setenv("CLOUDFLARED_HELPER_REQUIRE_MANAGEMENT_DIAGNOSTICS_DISABLED", "1")
+	t.Setenv("TUNNEL_MANAGEMENT_DIAGNOSTICS", "true")
+	t.Setenv("tunnel_management_diagnostics", "1")
+	t.Setenv("Tunnel_Management_Diagnostics", "false")
+
+	supervisor, state := newTestSupervisor(t, io.Discard, "secret-cloudflared-token")
+	startCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, supervisor.Start(startCtx))
+
+	ready, reason := state.Readiness()
+	require.True(t, ready, reason)
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	require.NoError(t, supervisor.Stop(stopCtx))
+}
+
 func TestCloudflaredEnvironmentReplacesInheritedToken(t *testing.T) {
 	t.Parallel()
 
@@ -241,6 +262,27 @@ func TestCloudflaredEnvironmentReplacesInheritedToken(t *testing.T) {
 	require.Contains(t, env, "TUNNEL_TOKEN=new-secret")
 	require.NotContains(t, env, "TUNNEL_TOKEN=old-secret")
 	require.NotContains(t, env, "CLOUDFLARED_TOKEN_REF=new-secret")
+}
+
+func TestCloudflaredEnvironmentDisablesManagementDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	env := cloudflaredEnvironment([]string{
+		"PATH=/bin",
+		"TUNNEL_MANAGEMENT_DIAGNOSTICS=true",
+		"tunnel_management_diagnostics=1",
+		"Tunnel_Management_Diagnostics=false",
+	}, "new-secret")
+
+	var diagnostics []string
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(key, "TUNNEL_MANAGEMENT_DIAGNOSTICS") {
+			diagnostics = append(diagnostics, entry)
+		}
+	}
+
+	require.Equal(t, []string{"TUNNEL_MANAGEMENT_DIAGNOSTICS=false"}, diagnostics)
 }
 
 func newTestSupervisor(t *testing.T, output io.Writer, token string) (*Supervisor, *State) {
@@ -328,6 +370,19 @@ func TestCloudflaredHelperProcess(t *testing.T) {
 	if metricsAddr == "" {
 		fmt.Fprintln(os.Stderr, "missing --metrics")
 		os.Exit(2)
+	}
+	if os.Getenv("CLOUDFLARED_HELPER_REQUIRE_MANAGEMENT_DIAGNOSTICS_DISABLED") == "1" {
+		var diagnostics []string
+		for _, entry := range os.Environ() {
+			key, _, ok := strings.Cut(entry, "=")
+			if ok && strings.EqualFold(key, "TUNNEL_MANAGEMENT_DIAGNOSTICS") {
+				diagnostics = append(diagnostics, entry)
+			}
+		}
+		if len(diagnostics) != 1 || diagnostics[0] != "TUNNEL_MANAGEMENT_DIAGNOSTICS=false" {
+			_, _ = fmt.Fprintf(os.Stderr, "unexpected management diagnostics environment: %v\n", diagnostics)
+			os.Exit(2)
+		}
 	}
 	mode := os.Getenv("CLOUDFLARED_HELPER_MODE")
 	if mode == "exit-before-ready" {

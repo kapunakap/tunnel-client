@@ -109,7 +109,8 @@ tunnel-client cloudflared config \
   --token-file /run/secrets/cloudflared/token \
   > /etc/cloudflared/config.yml
 chmod 600 /run/secrets/cloudflared/token
-cloudflared tunnel --config /etc/cloudflared/config.yml run
+TUNNEL_MANAGEMENT_DIAGNOSTICS=false \
+  cloudflared tunnel --config /etc/cloudflared/config.yml run
 ```
 
 The generated YAML references only the token file path; it never reads or
@@ -118,7 +119,10 @@ metrics/readiness to loopback by default, keeps application logs at `info` and
 transport logs at `warn`, uses automatic protocol/IP fallback, and sets
 explicit retry and graceful-shutdown budgets. Override those defaults with
 `tunnel-client cloudflared config --help` when the deployment requires a
-different metrics listener or network policy.
+different metrics listener or network policy. With the current reviewed pin,
+run direct `cloudflared` processes with
+`TUNNEL_MANAGEMENT_DIAGNOSTICS=false`; do not rely on
+`management-diagnostics: false` in YAML.
 
 ## Lifecycle and readiness
 
@@ -126,12 +130,18 @@ When a static token is configured or managed fetch is enabled, `tunnel-client ru
 
 1. fetches the managed runtime token first when requested and no static token is configured;
 2. launches bundled `cloudflared tunnel --no-autoupdate ... run`;
-3. passes the token only through the child `TUNNEL_TOKEN` environment variable;
+3. passes the token only through the child `TUNNEL_TOKEN` environment variable,
+   removes inherited `TUNNEL_MANAGEMENT_DIAGNOSTICS` values, and forces one
+   `TUNNEL_MANAGEMENT_DIAGNOSTICS=false`;
 4. waits up to `--cloudflared.ready-timeout` (default `30s`) for the
    loopback `cloudflared` `/ready` endpoint to report an active connection;
 5. keeps `/readyz` unavailable when the companion later loses readiness; and
 6. stops the child on normal shutdown or exits nonzero when the child exits
    unexpectedly.
+
+The diagnostics override removes remote `/metrics` and `/debug/pprof`
+routes while preserving the local loopback readiness and metrics endpoints used
+by tunnel-client.
 
 The managed fetch bypasses raw HTTP body logging. Child output is redacted
 before it enters tunnel-client logs. The token is also redacted from support

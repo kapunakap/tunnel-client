@@ -484,15 +484,22 @@ func reserveLoopbackAddr() (string, error) {
 }
 
 func cloudflaredEnvironment(environ []string, token string) []string {
-	out := make([]string, 0, len(environ)+1)
+	// Keep the diagnostics toggle fail-closed even when the parent environment
+	// attempts to enable remote management diagnostics.
+	out := make([]string, 0, len(environ)+2)
 	for _, entry := range environ {
 		key, value, ok := strings.Cut(entry, "=")
-		if ok && (strings.EqualFold(key, "TUNNEL_TOKEN") || (token != "" && value == token)) {
+		if ok && (strings.EqualFold(key, "TUNNEL_TOKEN") ||
+			strings.EqualFold(key, "TUNNEL_MANAGEMENT_DIAGNOSTICS") ||
+			(token != "" && value == token)) {
 			continue
 		}
 		out = append(out, entry)
 	}
-	return append(out, "TUNNEL_TOKEN="+token)
+	return append(out,
+		"TUNNEL_TOKEN="+token,
+		"TUNNEL_MANAGEMENT_DIAGNOSTICS=false",
+	)
 }
 
 func redactToken(message, token string) string {

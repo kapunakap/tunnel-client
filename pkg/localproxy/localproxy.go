@@ -1398,8 +1398,9 @@ func renderMCPResponse(w http.ResponseWriter, payload wiretypes.TunnelResponsePa
 }
 
 func appendMCPResponseHeaders(headers http.Header, responseHeaders http.Header, publicMCPURL string) {
+	connectionOptions := parseConnectionOptions(responseHeaders)
 	for name, values := range responseHeaders {
-		if shouldSkipResponseHeader(name) {
+		if shouldSkipResponseHeader(name) || isConnectionOption(name, connectionOptions) {
 			continue
 		}
 		for _, value := range values {
@@ -1412,8 +1413,9 @@ func appendMCPResponseHeaders(headers http.Header, responseHeaders http.Header, 
 }
 
 func renderOAuthDiscoveryResponse(w http.ResponseWriter, payload wiretypes.TunnelResponsePayload, publicMCPURL string) {
+	connectionOptions := parseConnectionOptions(payload.ResponseHeaders)
 	for name, values := range payload.ResponseHeaders {
-		if shouldSkipResponseHeader(name) {
+		if shouldSkipResponseHeader(name) || isConnectionOption(name, connectionOptions) {
 			continue
 		}
 		for _, value := range values {
@@ -1500,8 +1502,9 @@ func acceptsEventStream(headers http.Header) bool {
 }
 
 func responseUsesEventStream(headers http.Header) bool {
+	connectionOptions := parseConnectionOptions(headers)
 	for name, values := range headers {
-		if !strings.EqualFold(name, "Content-Type") {
+		if !strings.EqualFold(name, "Content-Type") || isConnectionOption(name, connectionOptions) {
 			continue
 		}
 		for _, value := range values {
@@ -1579,6 +1582,29 @@ func sanitizeForwardableRequestHeaders(headers http.Header) http.Header {
 	if headers == nil {
 		return nil
 	}
+	connectionOptions := parseConnectionOptions(headers)
+	out := make(http.Header, len(headers))
+	for name, values := range headers {
+		normalizedName := strings.ToLower(name)
+		if _, blocked := blockedRequestMCPHeaders[normalizedName]; blocked {
+			continue
+		}
+		if isConnectionOption(name, connectionOptions) {
+			continue
+		}
+		for _, value := range values {
+			if value != "" {
+				out.Add(name, value)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseConnectionOptions(headers http.Header) map[string]struct{} {
 	connectionOptions := make(map[string]struct{})
 	for name, values := range headers {
 		if !strings.EqualFold(name, "Connection") {
@@ -1593,25 +1619,12 @@ func sanitizeForwardableRequestHeaders(headers http.Header) http.Header {
 			}
 		}
 	}
-	out := make(http.Header, len(headers))
-	for name, values := range headers {
-		normalizedName := strings.ToLower(name)
-		if _, blocked := blockedRequestMCPHeaders[normalizedName]; blocked {
-			continue
-		}
-		if _, blocked := connectionOptions[normalizedName]; blocked {
-			continue
-		}
-		for _, value := range values {
-			if value != "" {
-				out.Add(name, value)
-			}
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	return connectionOptions
+}
+
+func isConnectionOption(name string, connectionOptions map[string]struct{}) bool {
+	_, ok := connectionOptions[strings.ToLower(name)]
+	return ok
 }
 
 func shouldSkipResponseHeader(name string) bool {

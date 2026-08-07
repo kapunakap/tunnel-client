@@ -306,6 +306,58 @@ func TestHandleMCPBuffersProgressUntilFinalJSONForNonSSEClient(t *testing.T) {
 	require.Equal(t, "done", final.Result.StructuredContent["message"])
 }
 
+func TestHandleMCPDropsConnectionNominatedResponseHeadersAndUsesJSON(t *testing.T) {
+	server := &localServer{
+		tunnelID:        types.TunnelID("tunnel_connectionoptionsaaaaaaaaaaaaaa"),
+		responseTimeout: time.Second,
+		stateCh:         make(chan struct{}),
+		inFlight:        make(map[string]*localRequest),
+	}
+	stateChanged := server.stateCh
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/mcp/"+server.tunnelID.String(),
+		strings.NewReader(`{"jsonrpc":"2.0","id":"tool-json","method":"tools/call"}`),
+	)
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	done := make(chan struct{})
+	go func() {
+		server.handleMCP(recorder, request)
+		close(done)
+	}()
+	<-stateChanged
+
+	server.mu.Lock()
+	var pending *localRequest
+	if len(server.pending) == 1 {
+		pending = server.pending[0]
+	}
+	server.mu.Unlock()
+	require.NotNil(t, pending)
+	pending.responseCh <- localResponse{payload: wiretypes.TunnelResponsePayload{
+		RequestID:    pending.id,
+		JSONResponse: json.RawMessage(`{"jsonrpc":"2.0","id":"tool-json","result":{"ok":true}}`),
+		ResponseHeaders: http.Header{
+			"Connection":        {" keep-alive,\tContent-Type ", " Mcp-Session-Id "},
+			"cOnNeCtIoN":        {" X-Custom-Response "},
+			"Content-Type":      {"text/event-stream"},
+			"Mcp-Session-Id":    {"upstream-session"},
+			"X-Custom-Response": {"connection-scoped"},
+			"X-Preserved":       {"kept"},
+		},
+		ResponseCode: http.StatusOK,
+		ResponseType: wiretypes.ResponsePayloadJSONRPC,
+	}}
+	<-done
+
+	require.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+	require.Empty(t, recorder.Header().Values("Mcp-Session-Id"))
+	require.Empty(t, recorder.Header().Values("X-Custom-Response"))
+	require.Equal(t, "kept", recorder.Header().Get("X-Preserved"))
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":"tool-json","result":{"ok":true}}`, recorder.Body.String())
+}
+
 func TestHandleResponsePreservesFinalWhenNotificationBufferIsFull(t *testing.T) {
 	request := &localRequest{
 		id:         "local-1",
@@ -512,6 +564,33 @@ func TestHandleOAuthDiscoveryDoesNotForwardConnectorAuthorization(t *testing.T) 
 
 	cancel()
 	<-done
+}
+
+func TestRenderOAuthDiscoveryResponseDropsConnectionNominatedHeaders(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	renderOAuthDiscoveryResponse(recorder, wiretypes.TunnelResponsePayload{
+		JSONResponse: json.RawMessage(`{"authorization_servers":["https://auth.example"]}`),
+		ResponseHeaders: http.Header{
+			"Connection":       {" keep-alive,\tWWW-Authenticate ", " Location "},
+			"cOnNeCtIoN":       {" Retry-After "},
+			"WWW-Authenticate": {`Bearer realm="connector"`},
+			"Location":         {"https://upstream.example/login"},
+			"Retry-After":      {"30"},
+			"X-Preserved":      {"kept"},
+		},
+		ResponseCode: http.StatusUnauthorized,
+		ResponseType: wiretypes.ResponsePayloadOAuth,
+	}, "http://local.test/v1/mcp/tunnel_connectionoptionsaaaaaaaaaaaaaa")
+
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+	require.Empty(t, recorder.Header().Values("WWW-Authenticate"))
+	require.Empty(t, recorder.Header().Values("Location"))
+	require.Empty(t, recorder.Header().Values("Retry-After"))
+	require.Equal(t, "kept", recorder.Header().Get("X-Preserved"))
+	require.JSONEq(t, `{
+		"authorization_servers":["https://auth.example"],
+		"resource":"http://local.test/v1/mcp/tunnel_connectionoptionsaaaaaaaaaaaaaa"
+	}`, recorder.Body.String())
 }
 
 func TestWaitForMCPProbeAllowsOAuthRequiredProbeError(t *testing.T) {

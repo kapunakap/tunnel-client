@@ -554,6 +554,10 @@ registered. If there are no targets, `harpoon` commands return
   - Flag (repeatable): `--harpoon.target="label=auth,url=https://auth.example.com,desc=Auth server"`
   - Env: `HARPOON_TARGETS` (semicolon- or newline-delimited list of the same
     `label=...,url=...,desc=...` entries)
+- **Outbound request headers**
+  - The `call_target` tool drops transport proxy forwarding and client-managed
+    identity headers, plus every caller-supplied field named by a `Connection`
+    header.
 - **Harpoon target metadata (`list_targets`)**
   - Each target includes `category`, `source`, and `tags` fields.
   - Config-provided targets default to `category=source=config`.

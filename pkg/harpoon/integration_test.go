@@ -37,6 +37,63 @@ type toolCallTestCase struct {
 func TestHarpoonInMemoryToolCall(t *testing.T) {
 	t.Parallel()
 
+	newConnectionNominatedHeadersCase := func() toolCallTestCase {
+		receivedHeaders := make(chan http.Header, 1)
+		return toolCallTestCase{
+			name: "call_target_drops_connection_nominated_headers",
+			payload: json.RawMessage(`{
+				"method": "tools/call",
+				"params": {
+					"name": "call_target",
+					"arguments": {
+						"label": "abc",
+						"method": "GET",
+						"headers": {
+							"Connection": "Authorization, X-API-Key",
+							"Authorization": "Bearer nested-secret",
+							"X-API-Key": "nested-key-secret",
+							"X-Safe-Header": "forwarded"
+						}
+					}
+				}
+			}`),
+			expectedPayload: json.RawMessage(`{
+				"status_code": 200,
+				"body_base64": "cG9uZw==",
+				"body_size_bytes": 4
+			}`),
+			setupHTTPServer: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					receivedHeaders <- r.Header.Clone()
+					w.Header().Set("Content-Type", "text/plain")
+					_, _ = w.Write([]byte("pong"))
+				}))
+			},
+			harpoonConfig: func(t *testing.T, httpServer *httptest.Server) config.HarpoonConfig {
+				t.Helper()
+				return config.HarpoonConfig{
+					AllowPlaintextHTTP: true,
+					MaxResponseBytes:   config.DefaultHarpoonMaxResponseBytes,
+					MaxRedirects:       config.DefaultHarpoonMaxRedirects,
+					Targets: []config.HarpoonTarget{{
+						Label:       "abc",
+						Description: "Test target",
+						BaseURL:     mustParseURL(t, httpServer.URL),
+					}},
+				}
+			},
+			validateResult: func(t *testing.T, result *mcp.CallToolResult, expected json.RawMessage) {
+				t.Helper()
+				validatePayloadResult(t, result, expected)
+				headers := <-receivedHeaders
+				require.Empty(t, headers.Get("Authorization"))
+				require.Empty(t, headers.Get("X-API-Key"))
+				require.Equal(t, "forwarded", headers.Get("X-Safe-Header"))
+			},
+		}
+	}
+
 	newRedirectAllowedCase := func() toolCallTestCase {
 		redirectTargetURL := ""
 		return toolCallTestCase{
@@ -238,6 +295,7 @@ func TestHarpoonInMemoryToolCall(t *testing.T) {
 				require.Contains(t, text.Text, "redirect blocked")
 			},
 		},
+		newConnectionNominatedHeadersCase(),
 		newRedirectAllowedCase(),
 	}
 
@@ -378,7 +436,7 @@ func TestHarpoonToolSchemas(t *testing.T) {
 			},
 				"headers": {
 					"type": "object",
-					"description": "HTTP headers to include in the request; transport proxy forwarding and client-managed identity headers are blocked",
+					"description": "HTTP headers to include in the request; transport proxy forwarding headers plus client-managed identity headers plus caller-supplied fields nominated by Connection are blocked",
 					"default": {},
 					"propertyNames": {
 					"type": "string",

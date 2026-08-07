@@ -98,7 +98,7 @@ type Server struct {
 type callTargetRequest struct {
 	Label            string            `json:"label" jsonschema:"minLength=1,maxLength=64,pattern=^[a-z0-9][a-z0-9_-]{0\\,63}$,description=Allowlisted target label"`
 	Method           string            `json:"method" jsonschema:"enum=GET,enum=POST,enum=PUT,description=HTTP method for the outbound request"`
-	Headers          map[string]string `json:"headers,omitempty" jsonschema:"description=HTTP headers to include in the request; transport proxy forwarding and client-managed identity headers are blocked"`
+	Headers          map[string]string `json:"headers,omitempty" jsonschema:"description=HTTP headers to include in the request; transport proxy forwarding headers plus client-managed identity headers plus caller-supplied fields nominated by Connection are blocked"`
 	Body             string            `json:"body,omitempty" jsonschema:"description=Request body as a raw string"`
 	TimeoutMS        *int              `json:"timeout_ms,omitempty" jsonschema:"description=Request timeout in milliseconds"`
 	MaxResponseBytes *int              `json:"max_response_bytes,omitempty" jsonschema:"description=Maximum response bytes to read"`
@@ -591,6 +591,19 @@ func filterOutboundHeaders(headers map[string]string) (http.Header, int, []strin
 	if len(headers) == 0 {
 		return http.Header{}, 0, nil
 	}
+	connectionNominated := make(map[string]struct{})
+	for key, value := range headers {
+		if !strings.EqualFold(strings.TrimSpace(key), "connection") {
+			continue
+		}
+		for _, option := range strings.Split(value, ",") {
+			normalized := strings.ToLower(strings.TrimSpace(option))
+			if normalized != "" {
+				connectionNominated[normalized] = struct{}{}
+			}
+		}
+	}
+
 	out := make(http.Header)
 	dropped := 0
 	classifications := make(map[string]struct{})
@@ -600,7 +613,8 @@ func filterOutboundHeaders(headers map[string]string) (http.Header, int, []strin
 			continue
 		}
 		canonical := http.CanonicalHeaderKey(trimmedKey)
-		if isBlockedOutboundHeader(canonical) {
+		_, nominatedByConnection := connectionNominated[strings.ToLower(trimmedKey)]
+		if isBlockedOutboundHeader(canonical) || nominatedByConnection {
 			dropped++
 			classifications[classifyDroppedHeaderName(canonical)] = struct{}{}
 			continue

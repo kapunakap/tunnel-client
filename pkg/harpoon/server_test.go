@@ -1021,6 +1021,26 @@ func TestFilterOutboundHeadersReportsLowCardinalityDrops(t *testing.T) {
 	require.Equal(t, []string{"custom", "not-forwardable", "sensitive-name"}, classifications)
 }
 
+func TestFilterOutboundHeadersDropsConnectionNominatedHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers, dropped, classifications := filterOutboundHeaders(map[string]string{
+		"Connection":    "Authorization, X-API-Key",
+		"cOnNeCtIoN":    " X-Trace-Id , Keep-Alive ",
+		"Authorization": "Bearer nested-secret",
+		"Content-Type":  "application/json",
+		"X-API-Key":     "nested-key-secret",
+		"X-Trace-Id":    "trace-secret",
+	})
+
+	require.Equal(t, "application/json", headers.Get("Content-Type"))
+	require.Empty(t, headers.Get("Authorization"))
+	require.Empty(t, headers.Get("X-API-Key"))
+	require.Empty(t, headers.Get("X-Trace-Id"))
+	require.Equal(t, 5, dropped)
+	require.Equal(t, []string{"custom", "not-forwardable", "sensitive-name"}, classifications)
+}
+
 func TestIsBlockedOutboundHeaderBlocksSpoofingAndRelayHeaders(t *testing.T) {
 	t.Parallel()
 

@@ -207,8 +207,9 @@ For the full surface (flags, defaults, advanced knobs), see [`configuration.md`]
 - `Authorization` headers are forwarded through the OpenAI tunnel service to
   your MCP server.
 - Custom MCP request headers configured on the app are forwarded through the
-  OpenAI tunnel service, except
-  internal auth and IP-forwarding transport headers.
+  OpenAI tunnel service after sanitization, except fixed proxy/hop-by-hop headers
+  (including every header named by `Connection`), internal auth headers, and
+  IP-forwarding transport headers.
 - Protected-resource OAuth discovery GETs are forwarded to the tunnel-client;
   discovery payloads and `WWW-Authenticate resource_metadata` are rewritten to
   OpenAI tunnel-service URLs for the same `tunnel_id`.

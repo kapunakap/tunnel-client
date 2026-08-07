@@ -74,16 +74,33 @@ var blockedRequestMCPHeaders = map[string]struct{}{
 	"content-type":                      {},
 	"forwarded":                         {},
 	"host":                              {},
+	"keep-alive":                        {},
+	"openai-organization":               {},
+	"proxy-authenticate":                {},
 	"proxy-authorization":               {},
 	"proxy-connection":                  {},
+	"te":                                {},
+	"trailer":                           {},
 	"transfer-encoding":                 {},
+	"true-client-ip":                    {},
+	"upgrade":                           {},
+	"via":                               {},
+	"x-client-ip":                       {},
+	"x-cluster-client-ip":               {},
 	"x-custom-cf-witness-actor":         {},
 	"x-custom-cf-witness-authorization": {},
+	"x-envoy-external-address":          {},
 	"x-forwarded-for":                   {},
+	"x-forwarded-host":                  {},
+	"x-forwarded-port":                  {},
+	"x-forwarded-proto":                 {},
+	"x-oai-brte-redeemable-token":       {},
 	"x-openai-actor-authorization":      {},
 	"x-openai-authorization":            {},
 	"x-openai-authorization-error":      {},
+	"x-openai-brte-redeemable-token":    {},
 	"x-openai-internal-caller":          {},
+	"x-openai-request-path":             {},
 	"x-openai-skip-auth":                {},
 	"x-original-forwarded-for":          {},
 	"x-real-ip":                         {},
@@ -1562,9 +1579,27 @@ func sanitizeForwardableRequestHeaders(headers http.Header) http.Header {
 	if headers == nil {
 		return nil
 	}
+	connectionOptions := make(map[string]struct{})
+	for name, values := range headers {
+		if !strings.EqualFold(name, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			for _, option := range strings.Split(value, ",") {
+				normalizedOption := strings.ToLower(strings.TrimSpace(option))
+				if normalizedOption != "" {
+					connectionOptions[normalizedOption] = struct{}{}
+				}
+			}
+		}
+	}
 	out := make(http.Header, len(headers))
 	for name, values := range headers {
-		if _, blocked := blockedRequestMCPHeaders[strings.ToLower(name)]; blocked {
+		normalizedName := strings.ToLower(name)
+		if _, blocked := blockedRequestMCPHeaders[normalizedName]; blocked {
+			continue
+		}
+		if _, blocked := connectionOptions[normalizedName]; blocked {
 			continue
 		}
 		for _, value := range values {

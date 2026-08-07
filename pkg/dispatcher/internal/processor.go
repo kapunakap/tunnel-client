@@ -789,6 +789,7 @@ func (p *mcpProcessor) forwardResponses(ctx context.Context, conn mcpclient.Forw
 	}()
 
 	req := cmd.Message().(*jsonrpc.Request)
+	notificationForwardingEnabled := true
 	postTerminalErrorResponse := func(cause error) {
 		if cause == nil {
 			return
@@ -857,9 +858,14 @@ func (p *mcpProcessor) forwardResponses(ctx context.Context, conn mcpclient.Forw
 		}
 
 		if notifyMsg, ok := asNotification(msg); ok {
-			if err := p.forwardNotification(ttlCtx, logger, cmd, responseCode, responseHeaders, notifyMsg, channel); err != nil {
+			if !notificationForwardingEnabled {
+				continue
+			}
+			keepForwarding, err := p.forwardNotification(ttlCtx, logger, cmd, responseCode, responseHeaders, notifyMsg, channel)
+			if err != nil {
 				return
 			}
+			notificationForwardingEnabled = keepForwarding
 			continue
 		}
 
@@ -969,7 +975,10 @@ func jsonRPCResponseHeaders(ctx context.Context, logger *slog.Logger, responseHe
 	return headers
 }
 
-func (p *mcpProcessor) forwardNotification(ctx context.Context, logger *slog.Logger, cmd controlplane.JsonRpcCommand, responseCode int, responseHeaders http.Header, notifyMsg *jsonrpc.Request, channel types.Channel) error {
+// forwardNotification returns false after a delivery failure so the caller can
+// keep draining toward the terminal response without repeatedly posting later
+// progress notifications for the same command.
+func (p *mcpProcessor) forwardNotification(ctx context.Context, logger *slog.Logger, cmd controlplane.JsonRpcCommand, responseCode int, responseHeaders http.Header, notifyMsg *jsonrpc.Request, channel types.Channel) (bool, error) {
 	logger.DebugContext(
 		ctx,
 		"dispatcher received notification from MCP server; forwarding to control plane",
@@ -982,7 +991,7 @@ func (p *mcpProcessor) forwardNotification(ctx context.Context, logger *slog.Log
 			err = errors.New("encoded notification from MCP server was empty")
 		}
 		logger.ErrorContext(ctx, "failed to encode notification from MCP server")
-		return newProtocolFailureError(err)
+		return false, newProtocolFailureError(err)
 	}
 
 	notificationHeaders := responseHeaders
@@ -1002,12 +1011,15 @@ func (p *mcpProcessor) forwardNotification(ctx context.Context, logger *slog.Log
 		if errors.Is(post.err, context.DeadlineExceeded) || errors.Is(post.err, context.Canceled) {
 			logger.WarnContext(ctx, "context canceled while forwarding notification to control plane", attrs...)
 		} else {
-			logger.ErrorContext(ctx, "failed to forward notification to control plane", attrs...)
+			logger.ErrorContext(ctx, "failed to forward notification to control plane; continuing to terminal response", attrs...)
 		}
-		return post.err
+		// Progress notifications are non-terminal and delivered at most once. A
+		// failed post must not discard the terminal MCP response that follows or
+		// trigger unbounded attempts for later progress notifications.
+		return false, nil
 	}
 
-	return nil
+	return true, nil
 }
 
 // asNotification returns the request when the message is a JSON-RPC notification (request without an ID).

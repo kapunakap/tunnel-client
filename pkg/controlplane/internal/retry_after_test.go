@@ -2,11 +2,13 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
+	tclog "github.com/openai/tunnel-client/pkg/log"
 	"github.com/openai/tunnel-client/pkg/tunnelctx"
 	"github.com/openai/tunnel-client/pkg/types"
 )
@@ -137,6 +140,161 @@ func TestPostResponseRetriesTransportFailureWithSameRequest(t *testing.T) {
 	require.True(t, attempts[0].hasDeadline)
 	require.True(t, attempts[1].hasDeadline)
 	require.Equal(t, attempts[0].deadline, attempts[1].deadline)
+}
+
+func TestPostResponseDoesNotRetryJSONRPCNotificationAfterAmbiguousFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		response func(*http.Request) (*http.Response, error)
+	}{
+		{
+			name: "transport failure",
+			response: func(req *http.Request) (*http.Response, error) {
+				markRequestWritten(t, req)
+				return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset after write")}
+			},
+		},
+		{
+			name: "retryable service unavailable",
+			response: func(req *http.Request) (*http.Response, error) {
+				return testHTTPResponse(req, http.StatusServiceUnavailable, http.Header{
+					"Retry-After": []string{"1"},
+				}), nil
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			client := newResponseRetryTestClient(t)
+			attempts := 0
+			client.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				if attempts == 1 {
+					return testCase.response(req)
+				}
+				return testHTTPResponse(req, http.StatusOK, nil), nil
+			})
+			var waits []time.Duration
+			client.retrySleep = func(_ context.Context, delay time.Duration) bool {
+				waits = append(waits, delay)
+				return true
+			}
+
+			notification := types.NewJSONRPCNotification(
+				types.DefaultChannel,
+				json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/progress"}`),
+				http.StatusOK,
+				http.Header{},
+			)
+			_, err := client.PostResponse(
+				responseContext(context.Background(), "shard-notification", ""),
+				types.RequestID("request-notification"),
+				notification,
+			)
+
+			require.Error(t, err)
+			require.Equal(t, 1, attempts)
+			require.Empty(t, waits)
+		})
+	}
+}
+
+func TestPostResponseRetriesJSONRPCNotificationBeforeCommit(t *testing.T) {
+	tests := []struct {
+		name     string
+		response func(*http.Request) (*http.Response, error)
+	}{
+		{
+			name: "transport failure before write",
+			response: func(*http.Request) (*http.Response, error) {
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+			},
+		},
+		{
+			name: "rate limited before resolve",
+			response: func(req *http.Request) (*http.Response, error) {
+				markRequestWritten(t, req)
+				return testHTTPResponse(req, http.StatusTooManyRequests, nil), nil
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			client := newResponseRetryTestClient(t)
+			attempts := 0
+			client.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				if attempts == 1 {
+					return testCase.response(req)
+				}
+				return testHTTPResponse(req, http.StatusOK, nil), nil
+			})
+			var waits []time.Duration
+			client.retrySleep = func(_ context.Context, delay time.Duration) bool {
+				waits = append(waits, delay)
+				return true
+			}
+
+			notification := types.NewJSONRPCNotification(
+				types.DefaultChannel,
+				json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/progress"}`),
+				http.StatusOK,
+				http.Header{},
+			)
+			_, err := client.PostResponse(
+				responseContext(context.Background(), "shard-notification", ""),
+				types.RequestID("request-notification"),
+				notification,
+			)
+
+			require.NoError(t, err)
+			require.Equal(t, 2, attempts)
+			require.Len(t, waits, 1)
+		})
+	}
+}
+
+func TestPostResponseRetriesJSONRPCNotificationBeforeWriteWithRawHTTPLogging(t *testing.T) {
+	client := newResponseRetryTestClient(t)
+	attempts := 0
+	base := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+		}
+		return testHTTPResponse(req, http.StatusOK, nil), nil
+	})
+	client.client.Transport = tclog.NewRoundTripper(
+		base,
+		newDiscardLogger(),
+		&config.LoggingConfig{HTTPRawUnsafe: true},
+		tclog.ComponentControlPlane,
+	)
+	var waits []time.Duration
+	client.retrySleep = func(_ context.Context, delay time.Duration) bool {
+		waits = append(waits, delay)
+		return true
+	}
+
+	notification := types.NewJSONRPCNotification(
+		types.DefaultChannel,
+		json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/progress"}`),
+		http.StatusOK,
+		http.Header{},
+	)
+	_, err := client.PostResponse(
+		responseContext(context.Background(), "shard-raw-logging", ""),
+		types.RequestID("request-raw-logging"),
+		notification,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
+	require.Len(t, waits, 1)
 }
 
 func TestPostResponseRetryAfterAndMalformedFallback(t *testing.T) {
@@ -425,6 +583,14 @@ func TestRetryableManagedCloudflareStatuses(t *testing.T) {
 	for _, statusCode := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
 		require.Falsef(t, isRetryableManagedCloudflareStatus(statusCode), "status %d should not retry", statusCode)
 	}
+}
+
+func markRequestWritten(t *testing.T, req *http.Request) {
+	t.Helper()
+	trace := httptrace.ContextClientTrace(req.Context())
+	require.NotNil(t, trace)
+	require.NotNil(t, trace.WroteRequest)
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
 }
 
 func newRetryAfterStatusError(t *testing.T, value string, now time.Time) *APIStatusError {

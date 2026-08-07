@@ -1,6 +1,7 @@
 package log
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -13,6 +14,14 @@ type LoggingRoundTripper struct {
 	base   http.RoundTripper
 	logger *slog.Logger
 }
+
+// valueFreeContext preserves cancellation and deadlines while preventing
+// DumpRequestOut's synthetic transport from invoking application trace hooks.
+type valueFreeContext struct {
+	context.Context
+}
+
+func (valueFreeContext) Value(any) any { return nil }
 
 // NewRoundTripper constructs a RoundTripper that logs raw HTTP traffic when the provided logging config enables it.
 // The component name, when non-empty, is attached to the emitted logs via the FieldComponent attribute.
@@ -60,7 +69,13 @@ func (l *LoggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 }
 
 func (l *LoggingRoundTripper) dumpRequest(req *http.Request) {
-	if dumpReq, err := httputil.DumpRequestOut(req, true); err == nil {
+	dumpRequest := req.Clone(valueFreeContext{Context: req.Context()})
+	defer func() {
+		// DumpRequestOut drains and replaces the clone's shallow-copied Body.
+		// Move the restored reader back so the real transport receives it.
+		req.Body = dumpRequest.Body
+	}()
+	if dumpReq, err := httputil.DumpRequestOut(dumpRequest, true); err == nil {
 		l.logger.DebugContext(req.Context(), "raw http request", slog.String("dump", string(dumpReq)))
 	} else {
 		l.logger.WarnContext(req.Context(), "failed to dump raw http request", slog.String("error", err.Error()))

@@ -9,10 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jpillora/backoff"
@@ -512,16 +514,28 @@ func (c *TunnelServiceClient) PostResponse(ctx context.Context, requestID types.
 	if attempts <= 0 {
 		attempts = defaultResponseRetryAttempts
 	}
+	isNotification := response.Type() == types.ResponseTypeJSONRPCNotification
 	responseBackoff := c.responseBackoff()
 	for attempt := 1; attempt <= attempts; attempt++ {
 		attemptReq, err := cloneRequestWithBody(req)
 		if err != nil {
 			return tunnelServiceRequestID, fmt.Errorf("controlplane responder: replay request body: %w", err)
 		}
+		var requestWritten atomic.Bool
+		if isNotification {
+			attemptReq = attemptReq.WithContext(httptrace.WithClientTrace(attemptReq.Context(), &httptrace.ClientTrace{
+				WroteRequest: func(httptrace.WroteRequestInfo) {
+					requestWritten.Store(true)
+				},
+			}))
+		}
 
 		resp, err := c.client.Do(attemptReq)
 		if err != nil {
-			if attempt == attempts {
+			// A notification remains non-final after tunnel-service accepts it. Once
+			// its request was written, a transport failure has ambiguous commit state;
+			// replaying it can enqueue the same notification twice.
+			if attempt == attempts || (isNotification && requestWritten.Load()) {
 				return tunnelServiceRequestID, fmt.Errorf("controlplane responder: post response: %w", err)
 			}
 			if !c.waitForRetry(ctx, responseBackoff.Duration()) {
@@ -548,7 +562,8 @@ func (c *TunnelServiceClient) PostResponse(ctx context.Context, requestID types.
 		default:
 			statusErr := newAPIStatusError("controlplane responder: unexpected status", resp, c.nowTime())
 			_ = resp.Body.Close()
-			if !isRetryableResponseStatus(resp.StatusCode) || attempt == attempts {
+			if !isRetryableResponseStatus(resp.StatusCode) || attempt == attempts ||
+				(isNotification && resp.StatusCode != http.StatusTooManyRequests) {
 				return tunnelServiceRequestID, statusErr
 			}
 			retryAfter, hasRetryAfter := statusErr.RetryAfter()

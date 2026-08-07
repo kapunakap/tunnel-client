@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2726,10 +2727,13 @@ func TestProcessorForwardResponsesBoundsNotificationPostByConnectionTTL(t *testi
 	require.WithinDuration(t, started.Add(connectionTTL), responder.deadline, time.Second)
 }
 
-func TestProcessorForwardResponsesClosesConnectionWhenNotificationForwardingFails(t *testing.T) {
+func TestProcessorForwardResponsesContinuesToTerminalResponseWhenNotificationForwardingFails(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	recorder := newRecordingResponder()
+	responder := &notificationFailingResponder{next: recorder, err: errors.New("notification post failed")}
 
 	callID, err := jsonrpc.MakeID("notification-forward-failure")
 	require.NoError(t, err)
@@ -2737,6 +2741,8 @@ func TestProcessorForwardResponsesClosesConnectionWhenNotificationForwardingFail
 	conn := &scriptedForwardingConnection{
 		statusCode: http.StatusOK,
 		readSteps: []readStep{
+			{msg: &jsonrpc.Request{Method: "notifications/progress"}, err: nil},
+			{msg: &jsonrpc.Request{Method: "notifications/progress"}, err: nil},
 			{msg: &jsonrpc.Request{Method: "notifications/progress"}, err: nil},
 			{msg: &jsonrpc.Response{ID: callID, Result: json.RawMessage(`{"ok":true}`)}, err: nil},
 		},
@@ -2747,7 +2753,7 @@ func TestProcessorForwardResponsesClosesConnectionWhenNotificationForwardingFail
 	processor, err := NewProcessor(processorParams{
 		Logger:          logger,
 		ChannelBindings: newTestChannelBindings(transport),
-		TunnelResponder: &failingResponder{err: errors.New("notification post failed")},
+		TunnelResponder: responder,
 		MCPConfig:       newTestMCPConfig(t, time.Second),
 		OAuthHTTPClient: &http.Client{},
 		ControlPlaneCfg: newTestControlPlaneConfig(t),
@@ -2764,10 +2770,15 @@ func TestProcessorForwardResponsesClosesConnectionWhenNotificationForwardingFail
 	}
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
+	response := recorder.waitForResponse(t)
+	require.Equal(t, cmd.id, response.requestID)
+	require.Equal(t, types.ResponseTypeJSONRPCResponse, response.response.Type())
+	require.Equal(t, int32(1), responder.notificationCalls.Load())
+	require.Equal(t, 1, strings.Count(logs.String(), "failed to forward notification to control plane"))
 
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
-	require.True(t, conn.closed)
+	require.False(t, conn.closed)
 }
 
 func TestProcessorForwardResponsesPostsTerminalErrorOnNonResponseMessage(t *testing.T) {
@@ -4097,6 +4108,20 @@ type failingResponder struct {
 
 func (r *failingResponder) PostResponse(context.Context, types.RequestID, *types.TunnelResponse) (types.TunnelServiceRequestID, error) {
 	return "", r.err
+}
+
+type notificationFailingResponder struct {
+	next              *recordingResponder
+	err               error
+	notificationCalls atomic.Int32
+}
+
+func (r *notificationFailingResponder) PostResponse(ctx context.Context, requestID types.RequestID, response *types.TunnelResponse) (types.TunnelServiceRequestID, error) {
+	if response.Type() == types.ResponseTypeJSONRPCNotification {
+		r.notificationCalls.Add(1)
+		return "", r.err
+	}
+	return r.next.PostResponse(ctx, requestID, response)
 }
 
 type countingResponder struct {

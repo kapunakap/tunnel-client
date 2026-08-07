@@ -452,11 +452,17 @@ A successful POST returns:
 - Keep polling until the process is stopped; `204` is normal, not an error.
 - For polls, retry transient network failures, `429`, and `5xx` with
   bounded exponential backoff and jitter.
-- For response POSTs, retry transient network failures, `408`, `429`,
+- For terminal response POSTs, retry transient network failures, `408`, `429`,
   `502`, `503`, and `504` with bounded exponential backoff and jitter.
   Preserve the exact body, headers, correlation values, and caller deadline
   across attempts; do not retry other `4xx` responses.
-- Retryable `429` and `503` responses may include the standard
+- For JSON-RPC notification POSTs, retry `429` and transport failures that occur
+  before the request is written. Notifications are non-terminal, so the request
+  remains pending after one is accepted; do not replay an ambiguous failure that
+  could enqueue the same notification twice. A notification delivery failure is
+  best-effort: skip later notifications for that command, keep draining the MCP
+  stream, and still attempt delivery of the terminal response.
+- When the rules above allow a retry, `429` and `503` responses may include the standard
   `Retry-After` header in either delta-seconds form (for example, `5`) or
   HTTP-date form. Treat a valid value as a minimum delay in addition to local
   backoff and jitter. Ignore malformed, negative, and expired values, cap

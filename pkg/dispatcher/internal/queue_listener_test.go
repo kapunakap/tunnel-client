@@ -44,8 +44,7 @@ func TestQueueListenerProcessesCommands(t *testing.T) {
 	listener, err := NewQueueListener(logger, processor, queue, mcpConfig, meterProvider)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	listener.Start(ctx)
 
@@ -153,8 +152,7 @@ func TestQueueListenerWaitBlocksUntilTasksComplete(t *testing.T) {
 	listener, err := NewQueueListener(logger, processor, queue, mcpConfig, meterProvider)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	listener.Start(ctx)
 
@@ -209,8 +207,7 @@ func TestQueueListenerRecordsWorkerOccupancyMetrics(t *testing.T) {
 	listener, err := NewQueueListener(logger, processor, queue, mcpConfig, meterProvider)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	listener.Start(ctx)
 
@@ -445,8 +442,7 @@ func TestQueueListenerFallsBackToInlineProcessingOnSubmitFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	listener.Start(ctx)
 	queue <- newTestCommand(0)
@@ -477,8 +473,7 @@ func TestQueueListenerReleaseTimeoutErrorDoesNotPanic(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	listener.Start(ctx)
 	close(queue)

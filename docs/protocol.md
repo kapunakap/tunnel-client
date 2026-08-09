@@ -342,7 +342,7 @@ Response fields:
 | `request_id` | yes | The polled command's opaque request ID. |
 | `channel` | no | Logical channel; send the command's channel when present. |
 | `resp_json` | depends | JSON-RPC payload; omit for acknowledgment-only responses. |
-| `resp_headers` | no | Multi-valued upstream MCP response headers. |
+| `resp_headers` | no | Multi-valued upstream MCP response headers after the protocol allowlist and `Connection` nominations are applied. |
 | `resp_code` | yes | HTTP-style status code from the MCP interaction. |
 | `resp_type` | no | Payload discriminator; defaults to `jsonrpc_response`. |
 
@@ -360,9 +360,13 @@ Supported `resp_type` values:
 When the target returns a valid JSON-RPC error, preserve its request `id` and
 exact `error.code`, `error.message`, and `error.data` values in `resp_json`.
 Preserve the actual target HTTP status in `resp_code` and the existing
-protocol-relevant response-header allowlist in `resp_headers`. This includes MCP
-capability error `-32003` and version error `-32004`; do not replace or decorate
-either with `-32603`.
+protocol-relevant response-header allowlist in `resp_headers`: `Content-Type`,
+`Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-ID`,
+`Access-Control-Expose-Headers`, and `WWW-Authenticate`. The client removes
+`Connection`, every response field it names, empty values, and unrelated
+upstream headers before posting the payload. This includes MCP capability error
+`-32003` and version error `-32004`; do not replace or decorate either with
+`-32603`.
 
 At the connector boundary, tunnel-service maps every informational `1xx` status
 to `502` because an informational response cannot terminate the request. Among

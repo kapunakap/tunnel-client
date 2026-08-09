@@ -12,6 +12,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -465,25 +466,32 @@ func (c *TunnelServiceClient) PostResponse(ctx context.Context, requestID types.
 		return "", errors.New("controlplane responder: channel is required")
 	}
 
+	responseType := wiretypes.ResponsePayloadJSONRPC
+	switch response.Type() {
+	case types.ResponseTypeJSONRPCNotification:
+		responseType = wiretypes.ResponsePayloadJSONRPCNotify
+	case types.ResponseTypeNotificationAcknowledgment:
+		responseType = wiretypes.ResponsePayloadNotifyAck
+	case types.ResponseTypeOAuthDiscovery:
+		responseType = wiretypes.ResponsePayloadOAuth
+	case types.ResponseTypeSessionTermination:
+		responseType = wiretypes.ResponsePayloadSessionTermination
+	}
+
+	responseHeaders := response.Headers()
+	// OAuth discovery responses are local-dev-proxy traffic with a separate response-header contract.
+	if responseType != wiretypes.ResponsePayloadOAuth {
+		responseHeaders = sanitizeMCPResponseHeaders(responseHeaders)
+	}
 	payload := wiretypes.TunnelResponsePayload{
 		RequestID:       requestID.String(),
-		ResponseHeaders: response.Headers(),
+		ResponseHeaders: responseHeaders,
 		ResponseCode:    response.ResponseCode(),
-		ResponseType:    wiretypes.ResponsePayloadJSONRPC,
+		ResponseType:    responseType,
 	}
 	payload.Channel = channel.String()
 	if rawResponse := response.Payload(); len(rawResponse) > 0 {
 		payload.JSONResponse = rawResponse
-	}
-	switch response.Type() {
-	case types.ResponseTypeJSONRPCNotification:
-		payload.ResponseType = wiretypes.ResponsePayloadJSONRPCNotify
-	case types.ResponseTypeNotificationAcknowledgment:
-		payload.ResponseType = wiretypes.ResponsePayloadNotifyAck
-	case types.ResponseTypeOAuthDiscovery:
-		payload.ResponseType = wiretypes.ResponsePayloadOAuth
-	case types.ResponseTypeSessionTermination:
-		payload.ResponseType = wiretypes.ResponsePayloadSessionTermination
 	}
 
 	body, err := json.Marshal(payload)
@@ -575,6 +583,73 @@ func (c *TunnelServiceClient) PostResponse(ctx context.Context, requestID types.
 	}
 
 	return tunnelServiceRequestID, errors.New("controlplane responder: exhausted response retries")
+}
+
+func sanitizeMCPResponseHeaders(headers http.Header) http.Header {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(headers))
+	for name := range headers {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+
+	connectionOptions := make(map[string]struct{})
+	for _, name := range keys {
+		if !strings.EqualFold(name, "Connection") {
+			continue
+		}
+		for _, value := range headers[name] {
+			for _, option := range strings.Split(value, ",") {
+				option = strings.ToLower(strings.Trim(option, " \t"))
+				if option != "" {
+					connectionOptions[option] = struct{}{}
+				}
+			}
+		}
+	}
+
+	sanitized := make(http.Header)
+	for _, name := range keys {
+		normalizedName := strings.ToLower(name)
+		canonicalName, allowed := canonicalResponseHeaderName(normalizedName)
+		if !allowed {
+			continue
+		}
+		if _, nominated := connectionOptions[normalizedName]; nominated {
+			continue
+		}
+		for _, value := range headers[name] {
+			if value != "" {
+				sanitized[canonicalName] = append(sanitized[canonicalName], value)
+			}
+		}
+	}
+	if len(sanitized) == 0 {
+		return nil
+	}
+	return sanitized
+}
+
+func canonicalResponseHeaderName(normalizedName string) (string, bool) {
+	switch normalizedName {
+	case "access-control-expose-headers":
+		return "Access-Control-Expose-Headers", true
+	case "content-type":
+		return "Content-Type", true
+	case "last-event-id":
+		return "Last-Event-Id", true
+	case "mcp-protocol-version":
+		return "Mcp-Protocol-Version", true
+	case "mcp-session-id":
+		return "Mcp-Session-Id", true
+	case "www-authenticate":
+		return "Www-Authenticate", true
+	default:
+		return "", false
+	}
 }
 
 // Poll requests up to limit commands from the control plane.

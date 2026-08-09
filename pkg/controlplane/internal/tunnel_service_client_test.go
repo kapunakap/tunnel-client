@@ -754,6 +754,138 @@ func TestTunnelServiceClientPostResponseSuccess(t *testing.T) {
 	}
 }
 
+func TestTunnelServiceClientPostResponseSanitizesResponseHeaders(t *testing.T) {
+	t.Parallel()
+
+	requestHeaders := http.Header{
+		"Access-Control-Expose-Headers": {"Mcp-Protocol-Version"},
+		"Connection":                    {" Content-Type, Mcp-Session-Id "},
+		"Content-Type":                  {"application/json"},
+		"Last-Event-ID":                 {"event-secret"},
+		"Mcp-Protocol-Version":          {"2025-03-26"},
+		"Mcp-Session-Id":                {"session-secret"},
+		"Set-Cookie":                    {"target-session=secret"},
+		"WWW-Authenticate":              {`Bearer realm="first"`, "", `Bearer realm="second"`},
+		"X-Internal-Response":           {"internal-secret"},
+		"cOnNeCtIoN":                    {" Last-Event-ID, X-Internal-Response "},
+		"mcp-protocol-version":          {"", "2025-06-18"},
+		"wWw-aUtHeNtIcAtE":              {`Bearer realm="third"`},
+	}
+	wantHeaders := http.Header{
+		"Access-Control-Expose-Headers": {"Mcp-Protocol-Version"},
+		"Mcp-Protocol-Version":          {"2025-03-26", "2025-06-18"},
+		"Www-Authenticate":              {`Bearer realm="first"`, `Bearer realm="second"`, `Bearer realm="third"`},
+	}
+
+	tests := []struct {
+		name         string
+		responseType wiretypes.ResponsePayloadType
+		response     func() *types.TunnelResponse
+	}{
+		{
+			name:         "jsonrpc response",
+			responseType: wiretypes.ResponsePayloadJSONRPC,
+			response: func() *types.TunnelResponse {
+				return types.NewTunnelResponse(
+					types.DefaultChannel,
+					json.RawMessage(`{"jsonrpc":"2.0","id":"1","error":{"code":-32603,"message":"failed"}}`),
+					http.StatusBadGateway,
+					requestHeaders,
+				)
+			},
+		},
+		{
+			name:         "jsonrpc notification",
+			responseType: wiretypes.ResponsePayloadJSONRPCNotify,
+			response: func() *types.TunnelResponse {
+				return types.NewJSONRPCNotification(
+					types.DefaultChannel,
+					json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/progress"}`),
+					http.StatusOK,
+					requestHeaders,
+				)
+			},
+		},
+		{
+			name:         "notification acknowledgment",
+			responseType: wiretypes.ResponsePayloadNotifyAck,
+			response: func() *types.TunnelResponse {
+				return types.NewNotificationAck(types.DefaultChannel, http.StatusAccepted, requestHeaders)
+			},
+		},
+		{
+			name:         "session termination",
+			responseType: wiretypes.ResponsePayloadSessionTermination,
+			response: func() *types.TunnelResponse {
+				return types.NewSessionTerminationResponse(types.DefaultChannel, http.StatusNoContent, requestHeaders)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var seenBody []byte
+			server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var err error
+				seenBody, err = io.ReadAll(r.Body)
+				require.NoError(t, err)
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			client, err := NewTunnelServiceClient(context.Background(), &config.ControlPlaneConfig{
+				BaseURL:  mustParseURL(t, server.URL),
+				TunnelID: types.TunnelID("response-header-boundary"),
+				APIKey:   "test-api-key",
+			}, nil, newDiscardLogger(), &config.LoggingConfig{}, testMeterProvider)
+			require.NoError(t, err)
+
+			ctx := tunnelctx.ContextWithShardToken(context.Background(), "shard-response-header-boundary")
+			_, err = client.PostResponse(ctx, types.RequestID("request-response-header-boundary"), tc.response())
+			require.NoError(t, err)
+
+			var payload struct {
+				ResponseHeaders http.Header                   `json:"resp_headers"`
+				ResponseType    wiretypes.ResponsePayloadType `json:"resp_type"`
+			}
+			require.NoError(t, json.Unmarshal(seenBody, &payload))
+			require.Equal(t, tc.responseType, payload.ResponseType)
+			require.Equal(t, wantHeaders, payload.ResponseHeaders)
+			require.Equal(t, `Bearer realm="first"`, payload.ResponseHeaders.Get("WWW-Authenticate"))
+		})
+	}
+}
+
+func TestSanitizeMCPResponseHeadersPreservesCanonicalAllowlist(t *testing.T) {
+	t.Parallel()
+
+	input := http.Header{
+		"access-control-expose-headers": {"Mcp-Session-Id"},
+		"content-type":                  {"application/json"},
+		"last-event-id":                 {"event-1"},
+		"mcp-protocol-version":          {"2025-06-18"},
+		"mcp-session-id":                {"session-1"},
+		"www-authenticate":              {`Bearer realm="mcp"`},
+	}
+	want := http.Header{
+		"Access-Control-Expose-Headers": {"Mcp-Session-Id"},
+		"Content-Type":                  {"application/json"},
+		"Last-Event-Id":                 {"event-1"},
+		"Mcp-Protocol-Version":          {"2025-06-18"},
+		"Mcp-Session-Id":                {"session-1"},
+		"Www-Authenticate":              {`Bearer realm="mcp"`},
+	}
+
+	wireBytes, err := json.Marshal(sanitizeMCPResponseHeaders(input))
+	require.NoError(t, err)
+	var roundTripped http.Header
+	require.NoError(t, json.Unmarshal(wireBytes, &roundTripped))
+	require.Equal(t, want, roundTripped)
+	for name, values := range want {
+		require.Equal(t, values, roundTripped.Values(name), name)
+		require.NotEmpty(t, roundTripped.Get(name), name)
+	}
+}
+
 func TestTunnelServiceClientPostResponseOAuthDiscovery(t *testing.T) {
 	t.Parallel()
 
@@ -788,9 +920,21 @@ func TestTunnelServiceClientPostResponseOAuthDiscovery(t *testing.T) {
 
 	ctx := tunnelctx.ContextWithShardToken(context.Background(), shardToken)
 	ctx = tunnelctx.ContextWithChannel(ctx, types.DefaultChannel)
-	resp := types.NewOAuthDiscoveryResponse(types.DefaultChannel, json.RawMessage(`{"resource":"https://example.com"}`), http.StatusOK, http.Header{
-		"Content-Type": []string{"application/json"},
-	})
+	headers := http.Header{
+		"Cache-Control":    {"no-store"},
+		"Content-Type":     {"application/json"},
+		"Location":         {"https://example.com/authorize"},
+		"Pragma":           {"no-cache"},
+		"Retry-After":      {"30"},
+		"WWW-Authenticate": {`Bearer realm="oauth"`},
+		"X-Preserved":      {"local-oauth-contract"},
+	}
+	resp := types.NewOAuthDiscoveryResponse(
+		types.DefaultChannel,
+		json.RawMessage(`{"resource":"https://example.com"}`),
+		http.StatusOK,
+		headers,
+	)
 
 	_, err = client.PostResponse(ctx, types.RequestID(requestID), resp)
 	require.NoError(t, err, "PostResponse failed")
@@ -813,7 +957,7 @@ func TestTunnelServiceClientPostResponseOAuthDiscovery(t *testing.T) {
 	require.JSONEq(t, `{"resource":"https://example.com"}`, string(payload.RPCResp), "unexpected payload")
 	require.Equal(t, http.StatusOK, payload.RespCode, "unexpected resp_code")
 	require.Equal(t, string(wiretypes.ResponsePayloadOAuth), payload.RespType, "unexpected resp_type")
-	require.Equal(t, http.Header{"Content-Type": []string{"application/json"}}, payload.RespHeaders)
+	require.Equal(t, headers, payload.RespHeaders)
 }
 
 func TestTunnelServiceClientPostResponsePrefersResponseChannel(t *testing.T) {

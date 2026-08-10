@@ -1298,6 +1298,7 @@ func TestProcessorReturnsErrorResponseOnWriteFailure(t *testing.T) {
 	requireTunnelFailure(t, rpcResp, tunnelFailure{
 		Version:                  1,
 		Source:                   tunnelFailureSourceTargetHTTP,
+		TransportErrorKind:       transportErrorKindHTTPStatus,
 		UpstreamResponseReceived: true,
 		UpstreamStatus:           http.StatusUnauthorized,
 	})
@@ -1557,7 +1558,7 @@ func TestProcessorConnectFailureReturnsTerminalErrorResponseAndRecordsLatency(t 
 	require.Equal(t, callID, rpcResp.ID)
 	require.NotNil(t, rpcResp.Error)
 	require.Equal(t, "Bad Gateway", rpcResp.Error.Error())
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceClientInternal})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceClientInternal, TransportErrorKind: transportErrorKindUnknown})
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -2063,7 +2064,7 @@ func TestProcessorReturnsBadGatewayOnWriteErrorWithoutStatusCode(t *testing.T) {
 	got := responder.waitForResponse(t)
 	require.Equal(t, http.StatusBadGateway, got.response.ResponseCode())
 	rpcResp := decodeJSONRPCResponse(t, got.response.Payload())
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceTransportClosed})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceTransportClosed, TransportErrorKind: transportErrorKindClosedPipe})
 	require.NotContains(t, string(got.response.Payload()), io.ErrClosedPipe.Error())
 
 	logs := logOutput.String()
@@ -2128,6 +2129,7 @@ func TestProcessorDoesNotLogMCPUpstreamTargetURL(t *testing.T) {
 	requireTunnelFailure(t, rpcResp, tunnelFailure{
 		Version:                  1,
 		Source:                   tunnelFailureSourceTargetHTTP,
+		TransportErrorKind:       transportErrorKindHTTPStatus,
 		UpstreamResponseReceived: true,
 		UpstreamStatus:           http.StatusMethodNotAllowed,
 	})
@@ -2393,7 +2395,7 @@ func TestProcessorForwardResponsesStopsOnEOF(t *testing.T) {
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceTransportClosed})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceTransportClosed, TransportErrorKind: transportErrorKindEOF})
 }
 
 func TestProcessorForwardResponsesStopsOnNilMessage(t *testing.T) {
@@ -2434,7 +2436,7 @@ func TestProcessorForwardResponsesStopsOnNilMessage(t *testing.T) {
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol, TransportErrorKind: transportErrorKindInvalidProtocolResponse})
 }
 
 func TestProcessorForwardResponsesStopsOnConnectionClosed(t *testing.T) {
@@ -2473,7 +2475,7 @@ func TestProcessorForwardResponsesStopsOnConnectionClosed(t *testing.T) {
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceTransportClosed})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceTransportClosed, TransportErrorKind: transportErrorKindConnectionClosed})
 }
 
 func TestProcessorForwardResponsesStopsOnEncodeError(t *testing.T) {
@@ -2515,7 +2517,7 @@ func TestProcessorForwardResponsesStopsOnEncodeError(t *testing.T) {
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol, TransportErrorKind: transportErrorKindInvalidProtocolResponse})
 }
 
 func TestProcessorForwardResponsesStopsOnReadError(t *testing.T) {
@@ -2554,7 +2556,7 @@ func TestProcessorForwardResponsesStopsOnReadError(t *testing.T) {
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceClientInternal})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceClientInternal, TransportErrorKind: transportErrorKindUnknown})
 }
 
 func TestProcessorForwardResponsesPostFailureStopsForwarding(t *testing.T) {
@@ -2820,7 +2822,7 @@ func TestProcessorForwardResponsesPostsTerminalErrorOnNonResponseMessage(t *test
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol, TransportErrorKind: transportErrorKindInvalidProtocolResponse})
 }
 
 func TestProcessorForwardResponsesPostsTerminalErrorOnInvalidID(t *testing.T) {
@@ -2861,7 +2863,7 @@ func TestProcessorForwardResponsesPostsTerminalErrorOnInvalidID(t *testing.T) {
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol, TransportErrorKind: transportErrorKindInvalidProtocolResponse})
 }
 
 func TestProcessorForwardResponsesPostsTerminalErrorOnIDMismatch(t *testing.T) {
@@ -2904,7 +2906,7 @@ func TestProcessorForwardResponsesPostsTerminalErrorOnIDMismatch(t *testing.T) {
 
 	require.NoError(t, processor.Process(context.Background(), cmd))
 	rpcResp := assertTerminalJSONRPCErrorResponse(t, responder, cmd, http.StatusBadGateway, "Bad Gateway")
-	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol})
+	requireTunnelFailure(t, rpcResp, tunnelFailure{Version: 1, Source: tunnelFailureSourceProtocol, TransportErrorKind: transportErrorKindInvalidProtocolResponse})
 }
 
 func TestProcessorForwardResponsesStopsWhenConnectionTTLReached(t *testing.T) {

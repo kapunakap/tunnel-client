@@ -249,11 +249,51 @@ func assertTunnelFailureContract(t *testing.T, spec map[string]any, componentSch
 	if got := stringSlice(t, source["x-known-values"], "tunnel_failure.source.x-known-values"); !reflect.DeepEqual(got, wantSources) {
 		t.Fatalf("unexpected known tunnel failure sources: got %v want %v", got, wantSources)
 	}
+	transportErrorKind := mustMap(t, failureProperties["transport_error_kind"], "tunnel_failure.transport_error_kind")
+	if got := mustString(t, transportErrorKind["type"], "tunnel_failure.transport_error_kind.type"); got != "string" {
+		t.Fatalf("expected transport error kind to be a string, got %q", got)
+	}
+	if maxLength, ok := transportErrorKind["maxLength"].(float64); !ok || maxLength != 64 {
+		t.Fatalf("expected transport error kind maxLength 64, got %v", transportErrorKind["maxLength"])
+	}
+	wantTransportErrorKinds := []string{
+		"closed_pipe",
+		"connection_aborted",
+		"connection_closed",
+		"connection_refused",
+		"connection_reset",
+		"dial",
+		"dns",
+		"eof",
+		"host_unreachable",
+		"http_status",
+		"invalid_mcp_error",
+		"invalid_protocol_response",
+		"malformed_json",
+		"network_unreachable",
+		"non_protocol_response",
+		"response_body_missing",
+		"response_body_too_large",
+		"response_body_unreadable",
+		"timeout",
+		"tls",
+		"unexpected_eof",
+		"unknown",
+	}
+	if got := stringSlice(t, transportErrorKind["x-known-values"], "tunnel_failure.transport_error_kind.x-known-values"); !reflect.DeepEqual(got, wantTransportErrorKinds) {
+		t.Fatalf("unexpected known transport error kinds: got %v want %v", got, wantTransportErrorKinds)
+	}
+	for _, required := range stringSlice(t, failureSchema["required"], "tunnel_failure.required") {
+		if required == "transport_error_kind" {
+			t.Fatal("transport_error_kind must remain optional for legacy clients")
+		}
+	}
 
 	valid := []map[string]any{
 		{
 			"version":                    float64(1),
 			"source":                     "transport_closed",
+			"transport_error_kind":       "closed_pipe",
 			"upstream_response_received": false,
 		},
 		{
@@ -295,6 +335,12 @@ func assertTunnelFailureContract(t *testing.T, spec map[string]any, componentSch
 			"source":                     "dns",
 			"upstream_response_received": false,
 			"upstream_status":            float64(502),
+		},
+		{
+			"version":                    float64(1),
+			"source":                     "dns",
+			"transport_error_kind":       strings.Repeat("x", 65),
+			"upstream_response_received": false,
 		},
 	}
 	for index, value := range invalid {
@@ -444,6 +490,7 @@ func TestSynthesizedFailureResponseMatchesTunnelServiceOpenAPI(t *testing.T) {
 					"tunnel_failure":{
 						"version":1,
 						"source":"target_http",
+						"transport_error_kind":"http_status",
 						"upstream_response_received":true,
 						"upstream_status":503
 					}

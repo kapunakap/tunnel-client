@@ -999,6 +999,37 @@
                   ],
                   "description": "Target HTTP error status. Present only for source=target_http when an actual target response was received; omit it for synthesized gateway status.",
                   "title": "Upstream Status"
+                },
+                "transport_error_kind": {
+                  "description": "Optional bounded diagnostic kind emitted by newer tunnel-clients for a synthesized transport failure. Readers must tolerate omission and unknown future values.",
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "title": "Transport Error Kind",
+                  "type": "string",
+                  "x-known-values": [
+                    "closed_pipe",
+                    "connection_aborted",
+                    "connection_closed",
+                    "connection_refused",
+                    "connection_reset",
+                    "dial",
+                    "dns",
+                    "eof",
+                    "host_unreachable",
+                    "http_status",
+                    "invalid_mcp_error",
+                    "invalid_protocol_response",
+                    "malformed_json",
+                    "network_unreachable",
+                    "non_protocol_response",
+                    "response_body_missing",
+                    "response_body_too_large",
+                    "response_body_unreadable",
+                    "timeout",
+                    "tls",
+                    "unexpected_eof",
+                    "unknown"
+                  ]
                 }
               },
               "required": [

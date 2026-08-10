@@ -57,6 +57,7 @@ func TestSynthesizedTargetHTTPFailureAppearsOnWireAndTunnelServiceAcceptsIt(t *t
 							TunnelFailure struct {
 								Version                  int    `json:"version"`
 								Source                   string `json:"source"`
+								TransportErrorKind       string `json:"transport_error_kind"`
 								UpstreamResponseReceived bool   `json:"upstream_response_received"`
 								UpstreamStatus           int    `json:"upstream_status"`
 							} `json:"tunnel_failure"`
@@ -75,6 +76,9 @@ func TestSynthesizedTargetHTTPFailureAppearsOnWireAndTunnelServiceAcceptsIt(t *t
 				failure := payload.Error.Data.TunnelFailure
 				if failure.Version != 1 || failure.Source != "target_http" {
 					tb.Fatalf("tunnel failure identity = version %d source %q", failure.Version, failure.Source)
+				}
+				if failure.TransportErrorKind != "malformed_json" {
+					tb.Fatalf("transport error kind = %q, want %q", failure.TransportErrorKind, "malformed_json")
 				}
 				if !failure.UpstreamResponseReceived || failure.UpstreamStatus != http.StatusServiceUnavailable {
 					tb.Fatalf(

@@ -393,6 +393,7 @@ Only when no valid MCP error can be recovered may a client synthesize JSON-RPC
         "tunnel_failure": {
           "version": 1,
           "source": "transport_closed",
+          "transport_error_kind": "closed_pipe",
           "upstream_response_received": false
         }
       }
@@ -413,6 +414,7 @@ The machine-readable schema is published as `x-tunnel-failure-schema` on the
 | --- | --- | --- |
 | `version` | yes | Positive integer. Version `1` is current; readers must tolerate future positive versions. |
 | `source` | yes | Bounded string. Known values are listed below; readers must tolerate unknown values. |
+| `transport_error_kind` | no | Optional fixed, low-cardinality diagnostic label emitted by newer clients; legacy clients omit it and readers must tolerate unknown future values. |
 | `upstream_response_received` | yes | Whether an actual target HTTP response was received. |
 | `upstream_status` | no | Target HTTP error status from `400` through `599`; valid only for `source: target_http` with `upstream_response_received: true`. |
 
@@ -424,6 +426,10 @@ pipe was already closed or became unusable before a target response, so
 `upstream_response_received` must be `false` and `upstream_status` must be
 omitted. A synthesized outer `resp_code` such as `502` is the tunnel response
 status; it is not evidence that the target returned that status.
+The OpenAPI schema lists the current fixed `transport_error_kind` values;
+readers must tolerate omitted or unknown future values.
+`canceled` remains a local-log-only diagnostic: canceled commands do not post
+a synthesized response, and the envelope builder omits it defensively.
 
 The provenance object is optional and additive. Existing clients may omit it,
 existing services continue accepting the nested value inside opaque

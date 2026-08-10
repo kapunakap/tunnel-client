@@ -33,9 +33,44 @@ const (
 	tunnelFailureSourceClientInternal  tunnelFailureSource = "client_internal"
 )
 
+// transportErrorKind is the bounded diagnostic taxonomy that can be emitted in
+// synthesized tunnel failure provenance. Keep the wire values stable: newer
+// clients may add kinds, but services must continue to tolerate unknown values.
+type transportErrorKind string
+
+const (
+	transportErrorKindUnspecified             transportErrorKind = ""
+	transportErrorKindClosedPipe              transportErrorKind = "closed_pipe"
+	transportErrorKindConnectionAborted       transportErrorKind = "connection_aborted"
+	transportErrorKindConnectionClosed        transportErrorKind = "connection_closed"
+	transportErrorKindConnectionRefused       transportErrorKind = "connection_refused"
+	transportErrorKindConnectionReset         transportErrorKind = "connection_reset"
+	transportErrorKindDial                    transportErrorKind = "dial"
+	transportErrorKindDNS                     transportErrorKind = "dns"
+	transportErrorKindEOF                     transportErrorKind = "eof"
+	transportErrorKindHostUnreachable         transportErrorKind = "host_unreachable"
+	transportErrorKindHTTPStatus              transportErrorKind = "http_status"
+	transportErrorKindInvalidMCPError         transportErrorKind = transportErrorKind(mcpclient.NonProtocolResponseInvalidMCPError)
+	transportErrorKindInvalidProtocolResponse transportErrorKind = "invalid_protocol_response"
+	transportErrorKindMalformedJSON           transportErrorKind = transportErrorKind(mcpclient.NonProtocolResponseMalformedJSON)
+	transportErrorKindNetworkUnreachable      transportErrorKind = "network_unreachable"
+	transportErrorKindNonProtocolResponse     transportErrorKind = "non_protocol_response"
+	transportErrorKindResponseBodyMissing     transportErrorKind = transportErrorKind(mcpclient.NonProtocolResponseBodyMissing)
+	transportErrorKindResponseBodyTooLarge    transportErrorKind = transportErrorKind(mcpclient.NonProtocolResponseBodyTooLarge)
+	transportErrorKindResponseBodyUnreadable  transportErrorKind = transportErrorKind(mcpclient.NonProtocolResponseBodyUnreadable)
+	transportErrorKindTimeout                 transportErrorKind = "timeout"
+	transportErrorKindTLS                     transportErrorKind = "tls"
+	transportErrorKindUnexpectedEOF           transportErrorKind = "unexpected_eof"
+	transportErrorKindUnknown                 transportErrorKind = "unknown"
+	// Cancellation remains local-log-only and is omitted from the public
+	// provenance envelope.
+	transportErrorKindCanceled transportErrorKind = "canceled"
+)
+
 type tunnelFailure struct {
 	Version                  int                 `json:"version"`
 	Source                   tunnelFailureSource `json:"source"`
+	TransportErrorKind       transportErrorKind  `json:"transport_error_kind,omitempty"`
 	UpstreamResponseReceived bool                `json:"upstream_response_received"`
 	UpstreamStatus           int                 `json:"upstream_status,omitempty"`
 }
@@ -64,9 +99,18 @@ func newProtocolFailureError(cause error) error {
 }
 
 func classifyTunnelFailure(statusCode int, err error) tunnelFailure {
+	transportErrorKind := classifyTransportErrorKind(statusCode, err)
+	// Cancellation is a local lifecycle outcome, not a target transport
+	// failure. Current cancellation paths drop without posting a synthesized
+	// response; keep the log-only classifier out of the public envelope if a
+	// future caller reaches this path.
+	if transportErrorKind == transportErrorKindCanceled {
+		transportErrorKind = transportErrorKindUnspecified
+	}
 	failure := tunnelFailure{
 		Version:                  1,
 		Source:                   tunnelFailureSourceClientInternal,
+		TransportErrorKind:       transportErrorKind,
 		UpstreamResponseReceived: false,
 	}
 
@@ -139,69 +183,82 @@ func classifyTunnelFailure(statusCode int, err error) tunnelFailure {
 	return failure
 }
 
-func classifyTransportErrorKind(statusCode int, err error) string {
-	if statusCode >= http.StatusBadRequest && statusCode <= 599 {
-		return "http_status"
-	}
-
+func classifyTransportErrorKind(statusCode int, err error) transportErrorKind {
 	var nonProtocolResponse *mcpclient.NonProtocolResponseError
 	if errors.As(err, &nonProtocolResponse) {
-		if kind := nonProtocolResponse.Kind(); kind != "" {
-			return string(kind)
-		}
-		return "non_protocol_response"
+		return transportErrorKindFromNonProtocolResponse(nonProtocolResponse.Kind())
+	}
+	if statusCode >= http.StatusBadRequest && statusCode <= 599 {
+		return transportErrorKindHTTPStatus
 	}
 	var protocolFailure *protocolFailureError
 	if errors.As(err, &protocolFailure) {
-		return "invalid_protocol_response"
+		return transportErrorKindInvalidProtocolResponse
 	}
 
 	switch {
 	case errors.Is(err, io.ErrClosedPipe), errors.Is(err, syscall.EPIPE):
-		return "closed_pipe"
+		return transportErrorKindClosedPipe
 	case errors.Is(err, io.EOF):
-		return "eof"
+		return transportErrorKindEOF
 	case errors.Is(err, io.ErrUnexpectedEOF):
-		return "unexpected_eof"
+		return transportErrorKindUnexpectedEOF
 	case errors.Is(err, net.ErrClosed), errors.Is(err, mcp.ErrConnectionClosed):
-		return "connection_closed"
+		return transportErrorKindConnectionClosed
 	case errors.Is(err, syscall.ECONNRESET):
-		return "connection_reset"
+		return transportErrorKindConnectionReset
 	case errors.Is(err, syscall.ECONNABORTED):
-		return "connection_aborted"
+		return transportErrorKindConnectionAborted
 	}
 
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
-		return "dns"
+		return transportErrorKindDNS
 	}
 	if isTLSFailure(err) {
-		return "tls"
+		return transportErrorKindTLS
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return "timeout"
+		return transportErrorKindTimeout
 	}
 	var timeoutErr interface{ Timeout() bool }
 	if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
-		return "timeout"
+		return transportErrorKindTimeout
 	}
 
 	switch {
 	case errors.Is(err, syscall.ECONNREFUSED):
-		return "connection_refused"
+		return transportErrorKindConnectionRefused
 	case errors.Is(err, syscall.ENETUNREACH):
-		return "network_unreachable"
+		return transportErrorKindNetworkUnreachable
 	case errors.Is(err, syscall.EHOSTUNREACH):
-		return "host_unreachable"
+		return transportErrorKindHostUnreachable
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && strings.EqualFold(opErr.Op, "dial") {
-		return "dial"
+		return transportErrorKindDial
 	}
 	if errors.Is(err, context.Canceled) {
-		return "canceled"
+		return transportErrorKindCanceled
 	}
-	return "unknown"
+	return transportErrorKindUnknown
+}
+
+func transportErrorKindFromNonProtocolResponse(kind mcpclient.NonProtocolResponseKind) transportErrorKind {
+	switch kind {
+	case mcpclient.NonProtocolResponseBodyMissing:
+		return transportErrorKindResponseBodyMissing
+	case mcpclient.NonProtocolResponseBodyUnreadable:
+		return transportErrorKindResponseBodyUnreadable
+	case mcpclient.NonProtocolResponseBodyTooLarge:
+		return transportErrorKindResponseBodyTooLarge
+	case mcpclient.NonProtocolResponseMalformedJSON:
+		return transportErrorKindMalformedJSON
+	case mcpclient.NonProtocolResponseInvalidMCPError:
+		return transportErrorKindInvalidMCPError
+	default:
+		return transportErrorKindNonProtocolResponse
+	}
 }
 
 func isTLSFailure(err error) bool {
@@ -246,10 +303,10 @@ func buildTunnelFailureJSONRPCErrorResponse(req *jsonrpc.Request, statusCode int
 	})
 }
 
-func tunnelFailureLogAttrs(failure tunnelFailure, transportErrorKind string) []any {
+func tunnelFailureLogAttrs(failure tunnelFailure, transportErrorKind transportErrorKind) []any {
 	attrs := []any{
 		slog.String("failure_source", string(failure.Source)),
-		slog.String("transport_error_kind", transportErrorKind),
+		slog.String("transport_error_kind", string(transportErrorKind)),
 		slog.Bool("upstream_response_received", failure.UpstreamResponseReceived),
 		slog.String("tunnel_client_version", version.Version),
 	}

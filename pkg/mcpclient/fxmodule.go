@@ -264,15 +264,10 @@ func runStartupProbe(
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	type result struct {
-		session probeSession
-		err     error
-	}
-
-	resultCh := make(chan result, 1)
+	resultCh := make(chan startupProbeResult)
 	go func() {
 		sess, err := connect(probeCtx)
-		resultCh <- result{session: sess, err: err}
+		deliverStartupProbeResult(probeCtx, resultCh, startupProbeResult{session: sess, err: err})
 	}()
 
 	select {
@@ -285,7 +280,7 @@ func runStartupProbe(
 			logger.ErrorContext(ctx, "mcp probe timed out", slog.Duration("timeout", timeout), slog.String("error", err.Error()))
 		}
 	case res := <-resultCh:
-		recordStartupProbeResult(ctx, logger, probeState, startupProbeResult(res))
+		recordStartupProbeResult(ctx, logger, probeState, res)
 	}
 }
 
@@ -389,17 +384,10 @@ func runStartupProbeAttempt(
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	resultCh := make(chan startupProbeResult, 1)
+	resultCh := make(chan startupProbeResult)
 	go func() {
 		sess, err := connect(probeCtx)
-		res := startupProbeResult{session: sess, err: err}
-		select {
-		case resultCh <- res:
-		case <-probeCtx.Done():
-			if sess != nil {
-				_ = sess.Close()
-			}
-		}
+		deliverStartupProbeResult(probeCtx, resultCh, startupProbeResult{session: sess, err: err})
 	}()
 
 	select {
@@ -410,6 +398,19 @@ func runStartupProbeAttempt(
 		return startupProbeResult{err: NewProbeTimeoutError(timeout, probeCtx.Err())}, true
 	case res := <-resultCh:
 		return res, true
+	}
+}
+
+// deliverStartupProbeResult transfers ownership of a completed probe session
+// to the receiver. If the probe deadline wins first, no receiver remains, so
+// close any late session instead of stranding it in a buffered channel.
+func deliverStartupProbeResult(ctx context.Context, resultCh chan<- startupProbeResult, res startupProbeResult) {
+	select {
+	case resultCh <- res:
+	case <-ctx.Done():
+		if res.session != nil {
+			_ = res.session.Close()
+		}
 	}
 }
 

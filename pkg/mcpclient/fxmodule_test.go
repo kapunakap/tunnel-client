@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -35,6 +36,29 @@ func (s *fakeProbeSession) Close() error {
 }
 
 func (s *fakeProbeSession) InitializeResult() *mcp.InitializeResult {
+	return &s.initResult
+}
+
+type closeSignalingProbeSession struct {
+	initResult mcp.InitializeResult
+	closed     chan struct{}
+	closeOnce  sync.Once
+}
+
+func newCloseSignalingProbeSession() *closeSignalingProbeSession {
+	return &closeSignalingProbeSession{
+		closed: make(chan struct{}),
+	}
+}
+
+func (s *closeSignalingProbeSession) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.closed)
+	})
+	return nil
+}
+
+func (s *closeSignalingProbeSession) InitializeResult() *mcp.InitializeResult {
 	return &s.initResult
 }
 
@@ -540,18 +564,25 @@ func TestRunStartupProbeMarksFailureWhenConnectHangs(t *testing.T) {
 
 	state := NewProbeState()
 	release := make(chan struct{})
+	session := newCloseSignalingProbeSession()
 
 	runStartupProbe(
 		context.Background(),
 		20*time.Millisecond,
 		func(context.Context) (probeSession, error) {
 			<-release
-			return nil, nil
+			return session, nil
 		},
 		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		state,
 	)
 	close(release)
+
+	select {
+	case <-session.closed:
+	case <-time.After(time.Second):
+		t.Fatal("expected late startup probe session to close after timeout")
+	}
 
 	_, err, ok := state.Wait(time.Second)
 	if !ok {
@@ -559,6 +590,78 @@ func TestRunStartupProbeMarksFailureWhenConnectHangs(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "mcp probe timed out after") {
 		t.Fatalf("expected startup probe timeout, got %v", err)
+	}
+}
+
+func TestRunStartupProbeAttemptClosesLateSessionAfterDeadline(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseConnect := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	t.Cleanup(releaseConnect)
+	started := make(chan struct{})
+	session := newCloseSignalingProbeSession()
+	resultCh := make(chan startupProbeResult, 1)
+	settledCh := make(chan bool, 1)
+
+	go func() {
+		res, settled := runStartupProbeAttempt(
+			context.Background(),
+			20*time.Millisecond,
+			func(context.Context) (probeSession, error) {
+				close(started)
+				<-release
+				return session, nil
+			},
+		)
+		resultCh <- res
+		settledCh <- settled
+	}()
+
+	<-started
+	var res startupProbeResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for startup probe attempt deadline")
+	}
+	if settled := <-settledCh; !settled {
+		t.Fatal("expected probe attempt deadline to settle")
+	}
+	if !IsTimeoutProbeError(res.err) {
+		t.Fatalf("expected startup probe timeout, got %v", res.err)
+	}
+
+	releaseConnect()
+	select {
+	case <-session.closed:
+	case <-time.After(time.Second):
+		t.Fatal("expected late retry probe session to close after deadline")
+	}
+}
+
+func TestDeliverStartupProbeResultClosesSessionAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	session := newCloseSignalingProbeSession()
+
+	deliverStartupProbeResult(
+		ctx,
+		make(chan startupProbeResult),
+		startupProbeResult{session: session},
+	)
+
+	select {
+	case <-session.closed:
+	case <-time.After(time.Second):
+		t.Fatal("expected canceled probe result delivery to close session")
 	}
 }
 

@@ -48,6 +48,8 @@ jobs:
         run: bash ./scripts/generate_homebrew_formula_test.sh
       - name: Test Homebrew publishing tooling
         run: bash ./scripts/publish_homebrew_formula_test.sh
+      - name: Test latest stable Homebrew publication wrapper
+        run: bash ./scripts/publish_latest_homebrew_formula_test.sh
       - name: Validate bundled cloudflared manifest
         run: |
           set -euo pipefail

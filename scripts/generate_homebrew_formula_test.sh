@@ -56,9 +56,8 @@ assert_contains "${generated}" 'libexec.install "tunnel-client", "cloudflared", 
 assert_contains "${generated}" 'bin.write_exec_script libexec/"tunnel-client"'
 assert_contains "${generated}" 'assert_match version.to_s, shell_output("#{bin}/tunnel-client --version")'
 
-if command -v ruby >/dev/null 2>&1; then
-  ruby -c "${formula}" >/dev/null
-fi
+command -v ruby >/dev/null 2>&1 || fail "ruby is required for formula syntax validation"
+ruby -c "${formula}" >/dev/null
 
 missing_checksums="${tmp_dir}/missing.txt"
 grep -v 'darwin-arm64' "${checksums}" > "${missing_checksums}"

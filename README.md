@@ -97,6 +97,35 @@ tool and connects it to the OpenAI Tunnel control plane.
   [`examples/go-sdk-inmemory`](examples/go-sdk-inmemory)
 - **Roadmap / design notes**: [`docs/roadmap.md`](docs/roadmap.md)
 
+## Homebrew publication tooling
+
+Homebrew installation is not generally available until a compatible stable
+Formula is present in the tap. For approved private-CI release automation,
+`scripts/publish_latest_homebrew_formula.sh` reads the latest published stable
+release, renders the Formula from its public checksum manifest, and opens a
+Formula-only pull request in `openai/homebrew-tools`; it never merges that PR.
+
+The wrapper keeps release reads separate from tap writes:
+
+- `TUNNEL_CLIENT_RELEASE_READ_TOKEN` is an optional read-only GitHub token for
+  the public release lookup.
+- `OPENAI_GITHUB_INSTALLATION_TOKEN_FILE` is the preferred private-CI input:
+  a mounted GitHub App installation-token JSON file scoped to
+  `openai/homebrew-tools` with only `contents:write` and
+  `pull_requests:write`. `OPENAI_GITHUB_INSTALLATION_TOKEN_JSON` remains
+  available for local testing.
+
+Run it only from the approved private publisher path:
+
+```bash
+TUNNEL_CLIENT_RELEASE_READ_TOKEN=<read-only-github-token> \
+OPENAI_GITHUB_INSTALLATION_TOKEN_FILE=/etc/secrets/github-installation-token/token-json \
+bash ./scripts/publish_latest_homebrew_formula.sh
+```
+
+See [`docs/development.md`](docs/development.md) for the local test command and
+the availability boundary.
+
 To generate the shareable guide output locally:
 
 ```bash

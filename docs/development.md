@@ -38,11 +38,33 @@ GitHub App credential path are provisioned. Do not document
 `brew install openai/tools/tunnel-client` as supported before a compatible
 stable Formula is present in the tap.
 
-Exercise the deterministic renderer and tap-PR publisher with:
+The stable-only `publish_latest_homebrew_formula.sh` wrapper is the handoff for
+that future private publisher. It reads only the latest published,
+non-draft/non-prerelease `v<semver>` GitHub release, downloads the public
+checksum manifest, renders the Formula, and calls
+`publish_homebrew_formula.sh` to open a Formula-only tap PR without merging it.
+Keep the credentials split: `TUNNEL_CLIENT_RELEASE_READ_TOKEN` is an optional
+read-only GitHub token for the release API, while
+`OPENAI_GITHUB_INSTALLATION_TOKEN_FILE` is the preferred private-CI input:
+a mounted GitHub App installation-token JSON file scoped to
+`openai/homebrew-tools` with only `contents:write` and
+`pull_requests:write`. `OPENAI_GITHUB_INSTALLATION_TOKEN_JSON` remains
+available for local testing.
+
+For an approved private-CI publisher invocation:
+
+```bash
+TUNNEL_CLIENT_RELEASE_READ_TOKEN=<read-only-github-token> \
+OPENAI_GITHUB_INSTALLATION_TOKEN_FILE=/etc/secrets/github-installation-token/token-json \
+bash ./scripts/publish_latest_homebrew_formula.sh
+```
+
+Exercise the deterministic renderer, tap-PR publisher, and stable wrapper with:
 
 ```bash
 bash ./scripts/generate_homebrew_formula_test.sh
 bash ./scripts/publish_homebrew_formula_test.sh
+bash ./scripts/publish_latest_homebrew_formula_test.sh
 ```
 
 The standalone `Homebrew formula smoke` workflow downloads checksums from an

@@ -59,3 +59,8 @@ spec:
 - The default health listener is `127.0.0.1:8080`. This example sets
   `HEALTH_LISTEN_ADDR=:8080` so kubelet probes can reach `/healthz` and `/readyz`
   on the Pod IP; keep the health port inside trusted cluster networking.
+- If the MCP container can bind its listener after `tunnel-client` starts, set
+  `MCP_STARTUP_WAIT_TIMEOUT` (for example, `60s`). The opt-in gate delays the
+  first control-plane poll until the main MCP HTTP listener is reachable, so an
+  already queued command is not consumed during the sidecar startup race. It
+  does not retry or replay commands after polling begins.

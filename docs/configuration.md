@@ -153,6 +153,8 @@ mcp:
     X-Internal-Auth: env:MCP_RUNTIME_HEADER_VALUE
   discovery_extra_headers:
     X-Discovery-Auth: file:/run/secrets/mcp-discovery-header
+  # Optional. Wait for a sidecar/local HTTP listener before the first poll.
+  startup_wait_timeout: 60s
   connection_max_ttl: 10m
   max_concurrent_requests: 10
 harpoon:
@@ -450,6 +452,20 @@ routing, streaming, OAuth discovery, and common setup pitfalls, see
   - Flag: `--mcp.connection-max-ttl`
   - Env: `MCP_CONNECTION_MAX_TTL`
   - Default: `10m`
+- **Startup listener wait (optional)**
+  - Flag: `--mcp.startup-wait-timeout`
+  - Env: `MCP_STARTUP_WAIT_TIMEOUT`
+  - YAML: `mcp.startup_wait_timeout`
+  - Default: `0s` (disabled)
+  - When positive for an HTTP-streamable `main` MCP binding, tunnel-client
+    delays its first control-plane poll and one-shot OAuth discovery until the
+    MCP listener accepts a connection. It retries only pre-connect
+    `connection refused` and missing Unix-socket errors during this window;
+    any HTTP response, including `401 Unauthorized`, proves the listener is
+    reachable.
+  - If the wait expires, polling resumes for compatibility while `/readyz`
+    remains non-ready for the startup failure. This setting does not retry or
+    replay tunneled MCP commands.
 - **Max concurrent requests**
   - Flag: `--mcp.max-concurrent-requests`
   - Env: `MCP_MAX_CONCURRENT_REQUESTS`

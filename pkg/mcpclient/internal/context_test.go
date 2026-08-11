@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -138,11 +139,29 @@ func TestHeaderCarrierNilIsSafe(t *testing.T) {
 	var carrier *HeaderCarrier
 	carrier.ApplyRequestHeaders(http.Header{})
 	carrier.StoreResponse(200, http.Header{"X": {"y"}})
+	carrier.StoreTransportError(errors.New("transport"))
 	if code, hdr := carrier.ResponseStatusAndHeaders(); code != 0 || hdr != nil {
 		t.Fatalf("expected nil carrier to return zero values, got (%d, %v)", code, hdr)
 	}
+	if carrier.TransportError() != nil {
+		t.Fatal("expected nil carrier TransportError to return nil")
+	}
 	if carrier.RequestHeaders() != nil {
 		t.Fatal("expected nil carrier RequestHeaders to return nil")
+	}
+}
+
+func TestHeaderCarrierStoreAndReturnTransportError(t *testing.T) {
+	t.Parallel()
+
+	_, carrier, err := ContextWithHeaders(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ContextWithHeaders: %v", err)
+	}
+	wantErr := errors.New("dial failed")
+	carrier.StoreTransportError(wantErr)
+	if got := carrier.TransportError(); !errors.Is(got, wantErr) {
+		t.Fatalf("transport error = %v, want %v", got, wantErr)
 	}
 }
 

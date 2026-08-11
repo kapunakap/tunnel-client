@@ -44,6 +44,9 @@ func (f *ForwardingRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	}
 	resp, err := f.base.RoundTrip(req)
 	if err != nil {
+		if carrier != nil {
+			carrier.StoreTransportError(err)
+		}
 		return resp, err
 	}
 	if carrier != nil && resp != nil {

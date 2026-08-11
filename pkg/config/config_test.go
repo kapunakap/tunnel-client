@@ -662,6 +662,7 @@ mcp:
     X-Internal-Auth: env:YAML_MCP_STATIC_HEADER
   discovery_extra_headers:
     X-Discovery-Auth: file:`+discoveryHeaderPath+`
+  startup_wait_timeout: 75s
   connection_max_ttl: 2m
   max_concurrent_requests: 9
 harpoon:
@@ -740,8 +741,8 @@ proxy:
 	if cfg.MCP.ServerURL == nil || cfg.MCP.ServerURL.String() != "https://yaml-mcp.example/mcp" {
 		t.Fatalf("unexpected main MCP server URL: %v", cfg.MCP.ServerURL)
 	}
-	if cfg.MCP.ConnectionMaxTTL != 2*time.Minute || cfg.MCP.MaxConcurrentRequests != 9 {
-		t.Fatalf("unexpected MCP limits: ttl=%s max=%d", cfg.MCP.ConnectionMaxTTL, cfg.MCP.MaxConcurrentRequests)
+	if cfg.MCP.StartupWaitTimeout != 75*time.Second || cfg.MCP.ConnectionMaxTTL != 2*time.Minute || cfg.MCP.MaxConcurrentRequests != 9 {
+		t.Fatalf("unexpected MCP limits: startup_wait=%s ttl=%s max=%d", cfg.MCP.StartupWaitTimeout, cfg.MCP.ConnectionMaxTTL, cfg.MCP.MaxConcurrentRequests)
 	}
 	if cfg.MCP.ExtraHeaders["X-Internal-Auth"] != "yaml-static-from-env" {
 		t.Fatalf("unexpected MCP extra headers: %#v", cfg.MCP.ExtraHeaders)
@@ -1515,6 +1516,83 @@ func TestLoadRejectsNonPositiveMCPConnectionTTL(t *testing.T) {
 		t.Fatalf("expected error for non-positive connection ttl")
 	}
 	if !strings.Contains(err.Error(), "mcp.connection-max-ttl") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadMCPStartupWaitTimeout(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want time.Duration
+	}{
+		{
+			name: "disabled by default",
+			want: 0,
+		},
+		{
+			name: "environment",
+			env:  map[string]string{"MCP_STARTUP_WAIT_TIMEOUT": "45s"},
+			want: 45 * time.Second,
+		},
+		{
+			name: "flag overrides environment",
+			args: []string{"--mcp.startup-wait-timeout=12s"},
+			env:  map[string]string{"MCP_STARTUP_WAIT_TIMEOUT": "45s"},
+			want: 12 * time.Second,
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string{
+				"--control-plane.tunnel-id", flagTunnelID,
+				"--mcp.server-url", "https://mcp.default",
+			}, testCase.args...)
+			cfg, err := Load(args, func(key string) (string, bool) {
+				if value, ok := testCase.env[key]; ok {
+					return value, true
+				}
+				if key == "CONTROL_PLANE_API_KEY" {
+					return "key", true
+				}
+				if key == "LOG_FORMAT" {
+					return "struct-text", true
+				}
+				return "", false
+			})
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.MCP.StartupWaitTimeout != testCase.want {
+				t.Fatalf("startup wait timeout = %s, want %s", cfg.MCP.StartupWaitTimeout, testCase.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsNegativeMCPStartupWaitTimeout(t *testing.T) {
+	t.Parallel()
+
+	_, err := Load([]string{
+		"--control-plane.tunnel-id", flagTunnelID,
+		"--mcp.server-url", "https://mcp.default",
+		"--mcp.startup-wait-timeout=-1s",
+	}, func(key string) (string, bool) {
+		if key == "CONTROL_PLANE_API_KEY" {
+			return "key", true
+		}
+		if key == "LOG_FORMAT" {
+			return "struct-text", true
+		}
+		return "", false
+	})
+	if err == nil || !strings.Contains(err.Error(), "mcp.startup-wait-timeout must not be negative") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

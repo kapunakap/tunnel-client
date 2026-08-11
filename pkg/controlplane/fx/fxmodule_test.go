@@ -2,11 +2,13 @@ package fx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	"github.com/openai/tunnel-client/pkg/controlplane/internal"
+	"github.com/openai/tunnel-client/pkg/mcpclient"
 	"github.com/openai/tunnel-client/pkg/mcpserverinfo"
 	"github.com/openai/tunnel-client/pkg/types"
 )
@@ -287,8 +290,106 @@ func TestRunPollerStartsEvenWhenFetcherBlocks(t *testing.T) {
 	app.RequireStop()
 }
 
+func TestRunPollerWaitsForMCPStartupProbeBeforeFirstPoll(t *testing.T) {
+	t.Parallel()
+
+	waitLog := newSignalWriter("waiting for MCP startup probe before first control-plane poll")
+	logger := slog.New(slog.NewTextHandler(waitLog, nil))
+	probeState := mcpclient.NewProbeState()
+	poller := &recordingPoller{started: make(chan struct{})}
+	mcpConfig := &config.MCPConfig{StartupWaitTimeout: time.Second}
+
+	app := fxtest.New(
+		t,
+		fx.Supply(logger, mcpConfig, probeState),
+		fx.Supply(fx.Annotate(poller, fx.As(new(internal.Poller)))),
+		fx.Invoke(runPoller),
+	)
+	app.RequireStart()
+
+	select {
+	case <-waitLog.Seen():
+	case <-time.After(time.Second):
+		t.Fatal("poller did not enter MCP startup wait")
+	}
+	select {
+	case <-poller.started:
+		t.Fatal("poller started before MCP startup probe completed")
+	default:
+	}
+
+	probeState.Set(nil)
+	select {
+	case <-poller.started:
+	case <-time.After(time.Second):
+		t.Fatal("poller did not start after MCP startup probe completed")
+	}
+	app.RequireStop()
+}
+
+func TestWaitForMCPStartupBeforePollingFailsOpenAfterProbeFailure(t *testing.T) {
+	t.Parallel()
+
+	state := mcpclient.NewProbeState()
+	state.Set(errors.New("mcp startup wait timed out"))
+	if !waitForMCPStartupBeforePolling(
+		context.Background(),
+		&config.MCPConfig{StartupWaitTimeout: time.Second},
+		state,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	) {
+		t.Fatal("completed startup wait failure must fail open for polling")
+	}
+}
+
+func TestWaitForMCPStartupBeforePollingStopsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitForMCPStartupBeforePolling(
+		ctx,
+		&config.MCPConfig{StartupWaitTimeout: time.Second},
+		mcpclient.NewProbeState(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	) {
+		t.Fatal("canceled startup wait must not start polling")
+	}
+}
+
 type blockingFetcher struct {
 	started chan struct{}
+}
+
+type recordingPoller struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (p *recordingPoller) Run(ctx context.Context) {
+	p.once.Do(func() { close(p.started) })
+	<-ctx.Done()
+}
+
+type signalWriter struct {
+	needle string
+	seen   chan struct{}
+	once   sync.Once
+}
+
+func newSignalWriter(needle string) *signalWriter {
+	return &signalWriter{needle: needle, seen: make(chan struct{})}
+}
+
+func (w *signalWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), w.needle) {
+		w.once.Do(func() { close(w.seen) })
+	}
+	return len(p), nil
+}
+
+func (w *signalWriter) Seen() <-chan struct{} {
+	return w.seen
 }
 
 func (f *blockingFetcher) Poll(ctx context.Context, limit int) ([]controlplane.PolledCommand, types.TunnelServiceRequestID, error) {

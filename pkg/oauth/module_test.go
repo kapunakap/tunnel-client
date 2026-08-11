@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/harpoon/hostbus"
+	"github.com/openai/tunnel-client/pkg/mcpclient"
 )
 
 type recordingBus struct {
@@ -232,4 +235,149 @@ func TestOAuthDiscoveryRequiresBus(t *testing.T) {
 	if err := app.Start(ctx); err == nil {
 		t.Fatalf("expected start error when host bus is missing")
 	}
+}
+
+func TestWaitForMCPStartupProbeDisabledPreservesLegacyBehavior(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForMCPStartupProbe(ctx, &config.MCPConfig{}, mcpclient.NewProbeState()); err != nil {
+		t.Fatalf("disabled startup wait returned error: %v", err)
+	}
+}
+
+func TestWaitForMCPStartupProbeWaitsForGate(t *testing.T) {
+	t.Parallel()
+
+	state := mcpclient.NewProbeState()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := waitForMCPStartupProbe(
+		ctx,
+		&config.MCPConfig{StartupWaitTimeout: time.Second},
+		state,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want context canceled", err)
+	}
+
+	state.Set(nil)
+	if err := waitForMCPStartupProbe(
+		context.Background(),
+		&config.MCPConfig{StartupWaitTimeout: time.Second},
+		state,
+	); err != nil {
+		t.Fatalf("completed startup wait returned error: %v", err)
+	}
+}
+
+func TestWaitForMCPStartupProbeRequiresStateWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	err := waitForMCPStartupProbe(
+		context.Background(),
+		&config.MCPConfig{StartupWaitTimeout: time.Second},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "MCP probe state is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOAuthDiscoveryWaitsForMCPStartupProbeBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	serverURL, err := url.Parse("https://mcp.example.test/mcp")
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	probeState := mcpclient.NewProbeState()
+	waitLog := newOAuthSignalWriter("waiting for MCP startup probe before OAuth discovery")
+	requested := make(chan struct{})
+	requestOnce := sync.Once{}
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestOnce.Do(func() { close(requested) })
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	})}
+	bus := &recordingBus{notify: make(chan struct{})}
+
+	app := fx.New(
+		fx.Provide(
+			func() *config.MCPConfig {
+				return &config.MCPConfig{
+					ServerURL:          serverURL,
+					TransportKind:      config.MCPTransportHTTPStreamable,
+					StartupWaitTimeout: time.Second,
+				}
+			},
+			fx.Annotate(
+				func() *http.Client { return httpClient },
+				fx.ResultTags(`name:"mcp_client"`),
+			),
+			func() hostbus.HostRegistrationBus { return bus },
+			func() *slog.Logger { return slog.New(slog.NewTextHandler(waitLog, nil)) },
+			func() *mcpclient.ProbeState { return probeState },
+			NewDiscoveryState,
+		),
+		fx.Invoke(startOAuthDiscovery),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		_ = app.Stop(context.Background())
+	}()
+
+	select {
+	case <-waitLog.Seen():
+	case <-time.After(time.Second):
+		t.Fatal("OAuth discovery did not enter MCP startup wait")
+	}
+	select {
+	case <-requested:
+		t.Fatal("OAuth discovery made a request before MCP startup probe completed")
+	default:
+	}
+
+	probeState.Set(nil)
+	select {
+	case <-requested:
+	case <-time.After(time.Second):
+		t.Fatal("OAuth discovery did not request metadata after MCP startup probe completed")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type oauthSignalWriter struct {
+	needle string
+	seen   chan struct{}
+	once   sync.Once
+}
+
+func newOAuthSignalWriter(needle string) *oauthSignalWriter {
+	return &oauthSignalWriter{needle: needle, seen: make(chan struct{})}
+}
+
+func (w *oauthSignalWriter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), w.needle) {
+		w.once.Do(func() { close(w.seen) })
+	}
+	return len(p), nil
+}
+
+func (w *oauthSignalWriter) Seen() <-chan struct{} {
+	return w.seen
 }

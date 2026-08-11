@@ -257,7 +257,10 @@ type MCPConfig struct {
 	ChannelBindings   []MCPChannelBinding
 	// AllowNoMain is set only for an explicit poll allowlist that excludes main.
 	// It keeps zero-value MCPConfig compatibility for older callers.
-	AllowNoMain           bool
+	AllowNoMain bool
+	// StartupWaitTimeout enables an opt-in startup gate for the main
+	// HTTP-streamable MCP listener. Zero preserves legacy behavior.
+	StartupWaitTimeout    time.Duration
 	ConnectionMaxTTL      time.Duration
 	MaxConcurrentRequests int
 	ExtraHeaders          map[string]string
@@ -446,6 +449,7 @@ func WriteUsage(fs *pflag.FlagSet, w io.Writer) {
 	_, _ = fmt.Fprintln(fs.Output(), "  CA_BUNDLE\tPath to a PEM CA bundle used for outbound TLS connections (additive to system trust) (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  MCP_EXTRA_HEADERS\tStatic headers for outbound MCP HTTP requests to the configured MCP server origin; values accept env:VAR or file:/path (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  MCP_DISCOVERY_EXTRA_HEADERS\tStatic headers for MCP discovery/probe requests to the configured MCP server origin; values accept env:VAR or file:/path (optional)")
+	_, _ = fmt.Fprintln(fs.Output(), "  MCP_STARTUP_WAIT_TIMEOUT\tMaximum opt-in startup wait for the main MCP HTTP listener before first poll (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  MCP_CLIENT_CERT\tPath (or env:VAR) to PEM client certificate for MCP mTLS (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  MCP_CLIENT_KEY\tPath (or env:VAR) to PEM client private key for MCP mTLS (optional)")
 	_, _ = fmt.Fprintln(fs.Output(), "  PROXY_CHECK_INTERVAL\tInterval between proxy connectivity checks (optional)")
@@ -495,6 +499,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("mcp.client-key", "", "Path to PEM client private key for MCP mTLS (format <path|env:VAR>) (env.MCP_CLIENT_KEY)")
 	fs.StringArray("mcp.extra-headers", nil, "Static HTTP headers to send to the configured MCP server origin (format 'Key: Value', repeatable; values accept env:VAR or file:/path) (env.MCP_EXTRA_HEADERS)")
 	fs.StringArray("mcp.discovery-extra-headers", nil, "Static HTTP headers to send to MCP discovery/probe requests for the configured MCP server origin (format 'Key: Value', repeatable; values accept env:VAR or file:/path) (env.MCP_DISCOVERY_EXTRA_HEADERS)")
+	fs.Duration("mcp.startup-wait-timeout", 0, "Maximum opt-in startup wait for the main MCP HTTP listener before first poll (env.MCP_STARTUP_WAIT_TIMEOUT)")
 	fs.Duration("mcp.connection-max-ttl", defaultMCPConnectionMaxTTL, "Maximum lifetime of MCP transport connections (env.MCP_CONNECTION_MAX_TTL)")
 	fs.Int("mcp.max-concurrent-requests", defaultMCPMaxConcurrentRequests, "Maximum number of requests actively dispatched to the MCP server (env.MCP_MAX_CONCURRENT_REQUESTS)")
 	fs.StringArray("harpoon.target", nil, "Harpoon target mapping (format 'label=...,url=...,unix-socket=...,desc=...') (env.HARPOON_TARGETS)")
@@ -1695,6 +1700,18 @@ func buildMCPConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, bool), gl
 		return MCPConfig{}, errors.New("mcp.connection-max-ttl must be positive")
 	}
 
+	startupWaitRaw := firstSet(
+		getValue(fs, "mcp.startup-wait-timeout"),
+		envOrDefault(lookupEnv, "MCP_STARTUP_WAIT_TIMEOUT", "0s"),
+	)
+	startupWaitTimeout, err := time.ParseDuration(startupWaitRaw)
+	if err != nil {
+		return MCPConfig{}, fmt.Errorf("invalid mcp.startup-wait-timeout: %w", err)
+	}
+	if startupWaitTimeout < 0 {
+		return MCPConfig{}, errors.New("mcp.startup-wait-timeout must not be negative")
+	}
+
 	maxConcurrent := defaultMCPMaxConcurrentRequests
 	if flag := fs.Lookup("mcp.max-concurrent-requests"); flag != nil && flag.Changed {
 		val, err := strconv.Atoi(flag.Value.String())
@@ -1780,6 +1797,7 @@ func buildMCPConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, bool), gl
 	cfg := MCPConfig{
 		ClientCertificate:     defaultClientCertificate,
 		ChannelBindings:       bindings,
+		StartupWaitTimeout:    startupWaitTimeout,
 		ConnectionMaxTTL:      ttl,
 		MaxConcurrentRequests: maxConcurrent,
 		ExtraHeaders:          extraHeaders,

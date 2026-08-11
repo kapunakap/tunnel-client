@@ -402,6 +402,9 @@ func readinessStatus(oauthState *oauth.DiscoveryState, probeState *mcpclient.Pro
 			if mcpclient.IsAuthRequiredProbeError(err) {
 				return http.StatusOK, "ready (mcp initialize requires auth: " + sanitizeReadinessError(err) + ")"
 			}
+			if mcpclient.IsStartupWaitTimeoutError(err) {
+				return http.StatusServiceUnavailable, "mcp startup wait failed: " + sanitizeReadinessError(err)
+			}
 			if mcpclient.IsTimeoutProbeError(err) {
 				return http.StatusOK, "ready (mcp startup probe timed out: " + sanitizeReadinessError(err) + ")"
 			}

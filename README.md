@@ -331,6 +331,10 @@ Starter prompts for Codex:
   `harpoon` is routable only when Harpoon has registered targets.
 - On startup, it fetches OAuth Protected Resource Metadata from the MCP server
   for diagnostics.
+- For sidecar deployments whose local MCP listener may bind after
+  `tunnel-client` starts, the optional `MCP_STARTUP_WAIT_TIMEOUT` gate delays
+  the first control-plane poll and OAuth discovery until the main MCP listener
+  is reachable.
 - For OAuth auth-server handling, `authorization_servers[0]` from PRMD is the
   only source of truth and metadata fetch target.
 - Metadata is accepted even when `issuer` differs from

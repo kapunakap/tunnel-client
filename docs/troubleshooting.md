@@ -77,6 +77,12 @@ If you are debugging why `/readyz` is failing or why the client never becomes
     reachable but requires auth during `initialize`.
   - `200 ready (mcp startup probe timed out: ...)` when the probe times out but
     startup should continue.
+- For a Kubernetes sidecar or other local listener that can bind after
+  `tunnel-client` starts, set `MCP_STARTUP_WAIT_TIMEOUT` to a positive
+  duration. During that window, pre-connect `connection refused` and missing
+  Unix-socket failures keep readiness pending and delay the first control-plane
+  poll; if the wait expires, polling resumes with the legacy behavior while
+  `/readyz` remains non-ready for the startup failure.
 - If the process is live but `/readyz` stays non-`200`, check logs for:
   - OAuth discovery failures
   - control-plane connectivity errors

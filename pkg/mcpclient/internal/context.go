@@ -20,6 +20,7 @@ type HeaderCarrier struct {
 	responseBodyCaptured bool
 	responseBodyTooLarge bool
 	responseBodyReadErr  error
+	transportErr         error
 }
 
 // ContextWithHeaders returns a context that carries the provided headers so the
@@ -92,6 +93,28 @@ func (c *HeaderCarrier) ResponseStatusAndHeaders() (int, http.Header) {
 		clone = c.response.Clone()
 	}
 	return c.statusCode, clone
+}
+
+// StoreTransportError records the underlying RoundTripper error before higher
+// protocol layers can flatten its error chain into text.
+func (c *HeaderCarrier) StoreTransportError(err error) {
+	if c == nil || err == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.transportErr = err
+}
+
+// TransportError returns the underlying RoundTripper error, if one was
+// captured for this request context.
+func (c *HeaderCarrier) TransportError() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.transportErr
 }
 
 // StoreResponseBodyCapture records a bounded copy of a non-success response

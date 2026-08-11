@@ -469,6 +469,25 @@ func TestReadinessHandler(t *testing.T) {
 		require.Contains(t, rec.Body.String(), "probe timed out")
 	})
 
+	t.Run("NotReadyWhenMCPStartupWaitTimesOut", func(t *testing.T) {
+		t.Parallel()
+
+		oauthState := oauth.NewDiscoveryState()
+		oauthState.Set(nil, nil, nil, nil)
+
+		probeState := mcpclient.NewProbeState()
+		probeState.Set(mcpclient.NewStartupWaitTimeoutError(30*time.Second, context.DeadlineExceeded))
+
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		rec := httptest.NewRecorder()
+
+		readinessHandler(oauthState, probeState)(rec, req)
+
+		res := rec.Result()
+		require.Equal(t, http.StatusServiceUnavailable, res.StatusCode)
+		require.Contains(t, rec.Body.String(), "mcp startup wait failed")
+	})
+
 }
 
 func TestReadinessHandlerReportsCloudflaredPending(t *testing.T) {

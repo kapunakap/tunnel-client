@@ -112,6 +112,9 @@ func TestForwardingRoundTripperRoundTrip(t *testing.T) {
 			if diff := cmp.Diff(tc.expectedHeaders, headers, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
 				t.Fatalf("response headers mismatch (-want +got):\n%s", diff)
 			}
+			if got := carrier.TransportError(); !errors.Is(got, tc.baseError) {
+				t.Fatalf("transport error mismatch: got %v, want %v", got, tc.baseError)
+			}
 		})
 	}
 }

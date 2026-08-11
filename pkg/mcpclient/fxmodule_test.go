@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -503,6 +504,37 @@ func TestConnectStartupProbeCarriesHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestConnectStartupProbePreservesCapturedTransportError(t *testing.T) {
+	t.Parallel()
+
+	transportErr := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	_, err := connectStartupProbe(
+		context.Background(),
+		func(ctx context.Context) (probeSession, error) {
+			req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:9090/mcp", nil)
+			if reqErr != nil {
+				t.Fatalf("new request: %v", reqErr)
+			}
+			rt := internal.NewForwardingRoundTripper(testRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return nil, transportErr
+			}))
+			if _, roundTripErr := rt.RoundTrip(req); !errors.Is(roundTripErr, transportErr) {
+				t.Fatalf("round trip error = %v, want %v", roundTripErr, transportErr)
+			}
+			// The MCP SDK currently flattens the transport error with %%v while
+			// formatting its initialize failure. connectStartupProbe must restore
+			// the captured transport cause for exact retry classification.
+			return nil, errors.New("calling initialize: rejected: sending initialize: dial tcp: connection refused")
+		},
+	)
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("probe error did not preserve ECONNREFUSED: %v", err)
+	}
+	if !isRetryableStartupProbeError(err, false) {
+		t.Fatalf("probe error should be retryable after captured transport cause: %v", err)
+	}
+}
+
 func TestRunStartupProbeMarksFailureWhenConnectHangs(t *testing.T) {
 	t.Parallel()
 
@@ -527,6 +559,225 @@ func TestRunStartupProbeMarksFailureWhenConnectHangs(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "mcp probe timed out after") {
 		t.Fatalf("expected startup probe timeout, got %v", err)
+	}
+}
+
+func TestRunStartupProbeWithRetryKeepsStatePendingUntilListenerReachable(t *testing.T) {
+	t.Parallel()
+
+	state := NewProbeState()
+	retryObserved := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	done := make(chan struct{})
+	session := &fakeProbeSession{initResult: mcp.InitializeResult{ProtocolVersion: "2025-03-26"}}
+	var attempts int
+	var logs bytes.Buffer
+
+	go func() {
+		defer close(done)
+		runStartupProbeWithRetry(
+			context.Background(),
+			startupProbeRetryOptions{
+				waitTimeout:  time.Second,
+				probeTimeout: time.Second,
+				backoffMin:   time.Millisecond,
+				backoffMax:   time.Millisecond,
+				wait: func(ctx context.Context, _ time.Duration) error {
+					close(retryObserved)
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-releaseRetry:
+						return nil
+					}
+				},
+			},
+			func(context.Context) (probeSession, error) {
+				attempts++
+				if attempts == 1 {
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+				}
+				return session, nil
+			},
+			slog.New(slog.NewTextHandler(&logs, nil)),
+			state,
+		)
+	}()
+
+	<-retryObserved
+	if state.IsDone() {
+		t.Fatal("probe state completed before listener became reachable")
+	}
+	close(releaseRetry)
+	<-done
+
+	_, err, ok := state.Wait(time.Second)
+	if !ok {
+		t.Fatal("expected probe state to complete")
+	}
+	if err != nil {
+		t.Fatalf("expected successful probe after retry, got %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempt count = %d, want 2", attempts)
+	}
+	if !session.closed {
+		t.Fatal("expected successful retry session to be closed")
+	}
+	if !strings.Contains(logs.String(), "retrying MCP startup probe") {
+		t.Fatalf("expected retry log, got %q", logs.String())
+	}
+}
+
+func TestRunStartupProbeWithRetryDoesNotRetryHTTPResponse(t *testing.T) {
+	t.Parallel()
+
+	state := NewProbeState()
+	var attempts int
+	runStartupProbeWithRetry(
+		context.Background(),
+		startupProbeRetryOptions{
+			waitTimeout:  time.Second,
+			probeTimeout: time.Second,
+			wait: func(context.Context, time.Duration) error {
+				t.Fatal("HTTP response must not retry")
+				return nil
+			},
+		},
+		func(context.Context) (probeSession, error) {
+			attempts++
+			return nil, NewProbeHTTPStatusError(http.StatusUnauthorized, syscall.ECONNREFUSED)
+		},
+		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		state,
+	)
+
+	_, err, ok := state.Wait(time.Second)
+	if !ok {
+		t.Fatal("expected probe state to complete")
+	}
+	if !IsAuthRequiredProbeError(err) {
+		t.Fatalf("expected auth-required probe error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempt count = %d, want 1", attempts)
+	}
+}
+
+func TestRunStartupProbeWithRetryTimeoutRemainsReadinessFailure(t *testing.T) {
+	t.Parallel()
+
+	state := NewProbeState()
+	runStartupProbeWithRetry(
+		context.Background(),
+		startupProbeRetryOptions{
+			waitTimeout:  time.Second,
+			probeTimeout: time.Second,
+			wait: func(context.Context, time.Duration) error {
+				return context.DeadlineExceeded
+			},
+		},
+		func(context.Context) (probeSession, error) {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		},
+		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		state,
+	)
+
+	_, err, ok := state.Wait(time.Second)
+	if !ok {
+		t.Fatal("expected probe state to complete")
+	}
+	if !IsStartupWaitTimeoutError(err) {
+		t.Fatalf("expected startup wait timeout error, got %v", err)
+	}
+	if IsTimeoutProbeError(err) {
+		t.Fatalf("startup wait timeout must not be classified as legacy probe timeout: %v", err)
+	}
+}
+
+func TestRunStartupProbeWithRetryStopsOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	state := NewProbeState()
+	ctx, cancel := context.WithCancel(context.Background())
+	retryObserved := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runStartupProbeWithRetry(
+			ctx,
+			startupProbeRetryOptions{
+				waitTimeout:  time.Second,
+				probeTimeout: time.Second,
+				wait: func(ctx context.Context, _ time.Duration) error {
+					close(retryObserved)
+					<-ctx.Done()
+					return ctx.Err()
+				},
+			},
+			func(context.Context) (probeSession, error) {
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+			},
+			slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+			state,
+		)
+	}()
+
+	<-retryObserved
+	cancel()
+	<-done
+	if state.IsDone() {
+		t.Fatal("canceled startup retry must not publish a probe result")
+	}
+}
+
+func TestIsRetryableStartupProbeError(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name            string
+		err             error
+		retryUnixENOENT bool
+		want            bool
+	}{
+		{
+			name: "tcp connection refused",
+			err:  &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED},
+			want: true,
+		},
+		{
+			name:            "unix socket missing",
+			err:             &net.OpError{Op: "dial", Net: "unix", Err: syscall.ENOENT},
+			retryUnixENOENT: true,
+			want:            true,
+		},
+		{
+			name: "missing path without unix binding",
+			err:  &net.OpError{Op: "dial", Net: "unix", Err: syscall.ENOENT},
+			want: false,
+		},
+		{
+			name: "http response wins over wrapped refusal",
+			err:  NewProbeHTTPStatusError(http.StatusServiceUnavailable, syscall.ECONNREFUSED),
+			want: false,
+		},
+		{
+			name: "non-retryable failure",
+			err:  errors.New("tls handshake failed"),
+			want: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isRetryableStartupProbeError(testCase.err, testCase.retryUnixENOENT); got != testCase.want {
+				t.Fatalf("isRetryableStartupProbeError() = %t, want %t", got, testCase.want)
+			}
+		})
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/openai/tunnel-client/pkg/controlplane/internal"
 	"github.com/openai/tunnel-client/pkg/harpoon"
 	tclog "github.com/openai/tunnel-client/pkg/log"
+	"github.com/openai/tunnel-client/pkg/mcpclient"
 	"github.com/openai/tunnel-client/pkg/mcpserverinfo"
 	"github.com/openai/tunnel-client/pkg/proxy"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
@@ -224,9 +225,11 @@ func newPoller(p pollerParams) (internal.Poller, error) {
 type runnerParams struct {
 	fx.In
 
-	Lifecycle fx.Lifecycle
-	Logger    *slog.Logger
-	Poller    internal.Poller
+	Lifecycle     fx.Lifecycle
+	Logger        *slog.Logger
+	Poller        internal.Poller
+	MCPConfig     *config.MCPConfig     `optional:"true"`
+	MCPProbeState *mcpclient.ProbeState `optional:"true"`
 }
 
 type metadataParams struct {
@@ -320,6 +323,9 @@ func runPoller(p runnerParams) error {
 			logger.InfoContext(ctx, "starting control-plane poller")
 			go func() {
 				defer close(done)
+				if !waitForMCPStartupBeforePolling(ctx, p.MCPConfig, p.MCPProbeState, logger) {
+					return
+				}
 				p.Poller.Run(ctx)
 			}()
 			return nil
@@ -337,6 +343,42 @@ func runPoller(p runnerParams) error {
 	})
 
 	return nil
+}
+
+// waitForMCPStartupBeforePolling preserves the legacy immediate-poll behavior
+// unless the operator explicitly enables the main MCP listener startup wait.
+// The probe owns the configured timeout and always settles its state on
+// exhaustion, so a failed gate is fail-open for polling but remains visible to
+// readiness through ProbeState.
+func waitForMCPStartupBeforePolling(
+	ctx context.Context,
+	mcpConfig *config.MCPConfig,
+	probeState *mcpclient.ProbeState,
+	logger *slog.Logger,
+) bool {
+	if mcpConfig == nil || mcpConfig.StartupWaitTimeout <= 0 {
+		return true
+	}
+	if probeState == nil {
+		if logger != nil {
+			logger.WarnContext(ctx, "MCP startup wait enabled without probe state; starting control-plane poller")
+		}
+		return true
+	}
+	if logger != nil {
+		logger.InfoContext(ctx, "waiting for MCP startup probe before first control-plane poll",
+			slog.Duration("timeout", mcpConfig.StartupWaitTimeout),
+		)
+	}
+	if err := probeState.WaitUntilDone(ctx); err != nil {
+		return false
+	}
+	if _, probeErr, ok := probeState.Wait(0); ok && probeErr != nil && logger != nil {
+		logger.WarnContext(ctx, "MCP startup probe completed with failure; starting control-plane poller for compatibility",
+			slog.String("error", tclog.ErrorForLog(probeErr)),
+		)
+	}
+	return true
 }
 
 type queueAdapter struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/harpoon/hostbus"
 	tclog "github.com/openai/tunnel-client/pkg/log"
+	"github.com/openai/tunnel-client/pkg/mcpclient"
 )
 
 // Module wires OAuth discovery state and fetcher.
@@ -31,6 +32,7 @@ type discoveryParams struct {
 	HTTPClient *http.Client `name:"mcp_client"`
 	State      *DiscoveryState
 	Bus        hostbus.HostRegistrationBus
+	ProbeState *mcpclient.ProbeState `optional:"true"`
 }
 
 func startOAuthDiscovery(p discoveryParams) error {
@@ -54,6 +56,7 @@ func startOAuthDiscovery(p discoveryParams) error {
 	}
 
 	logger := p.Logger.With(tclog.FieldComponent, "oauth")
+	ctx, cancel := context.WithCancel(context.Background())
 
 	transportKind := p.MCPConfig.TransportKind
 	if transportKind == "" {
@@ -62,20 +65,34 @@ func startOAuthDiscovery(p discoveryParams) error {
 	serverURL := p.MCPConfig.ServerURL
 
 	p.Lifecycle.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error {
+		OnStart: func(startCtx context.Context) error {
 			if transportKind != config.MCPTransportHTTPStreamable || serverURL == nil {
 				reason := fmt.Sprintf("oauth discovery disabled for transport %q", transportKind)
 				if serverURL == nil {
 					reason = "oauth discovery server URL is not configured"
 				}
 				p.State.Set(nil, errors.New(reason), nil, nil)
-				logger.DebugContext(ctx, reason)
+				logger.DebugContext(startCtx, reason)
 				return nil
 			}
 
 			go func() {
-				fetchCtx, cancel := context.WithTimeout(context.Background(), DefaultDiscoveryTimeout)
-				defer cancel()
+				if p.MCPConfig.StartupWaitTimeout > 0 {
+					logger.InfoContext(ctx, "waiting for MCP startup probe before OAuth discovery",
+						slog.Duration("timeout", p.MCPConfig.StartupWaitTimeout),
+					)
+				}
+				if err := waitForMCPStartupProbe(ctx, p.MCPConfig, p.ProbeState); err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					p.State.Set(nil, err, nil, nil)
+					logger.WarnContext(ctx, "OAuth discovery disabled", slog.String("error", err.Error()))
+					return
+				}
+
+				fetchCtx, fetchCancel := context.WithTimeout(ctx, DefaultDiscoveryTimeout)
+				defer fetchCancel()
 
 				start := time.Now()
 				candidates, probe, err := BuildOAuthDiscoveryCandidates(fetchCtx, p.HTTPClient, serverURL, logger)
@@ -139,9 +156,23 @@ func startOAuthDiscovery(p discoveryParams) error {
 
 			return nil
 		},
+		OnStop: func(context.Context) error {
+			cancel()
+			return nil
+		},
 	})
 
 	return nil
+}
+
+func waitForMCPStartupProbe(ctx context.Context, cfg *config.MCPConfig, probeState *mcpclient.ProbeState) error {
+	if cfg == nil || cfg.StartupWaitTimeout <= 0 {
+		return nil
+	}
+	if probeState == nil {
+		return errors.New("oauth discovery: MCP probe state is required when startup wait is enabled")
+	}
+	return probeState.WaitUntilDone(ctx)
 }
 
 func logDiscoveredURLs(logger *slog.Logger, bundle hostbus.URLBundle) {

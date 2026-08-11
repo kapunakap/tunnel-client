@@ -161,3 +161,43 @@ func IsTimeoutProbeError(err error) bool {
 	var timeoutErr *ProbeTimeoutError
 	return errors.As(err, &timeoutErr)
 }
+
+// StartupWaitTimeoutError reports that the opt-in listener startup wait
+// exhausted its budget while the target continued returning a retryable
+// pre-connect failure. It deliberately remains distinct from ProbeTimeoutError:
+// the legacy probe timeout is readiness-compatible, while exhausting the
+// operator-requested listener gate must keep readiness failed.
+type StartupWaitTimeoutError struct {
+	Timeout time.Duration
+	Cause   error
+}
+
+func (e *StartupWaitTimeoutError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("mcp startup wait timed out after %s: %v", e.Timeout, e.Cause)
+}
+
+func (e *StartupWaitTimeoutError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// NewStartupWaitTimeoutError constructs the non-ready error recorded when the
+// opt-in MCP listener wait exhausts its configured budget.
+func NewStartupWaitTimeoutError(timeout time.Duration, cause error) error {
+	return &StartupWaitTimeoutError{
+		Timeout: timeout,
+		Cause:   cause,
+	}
+}
+
+// IsStartupWaitTimeoutError reports whether err was produced by an exhausted
+// opt-in MCP listener startup wait.
+func IsStartupWaitTimeoutError(err error) bool {
+	var timeoutErr *StartupWaitTimeoutError
+	return errors.As(err, &timeoutErr)
+}

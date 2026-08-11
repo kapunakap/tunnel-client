@@ -2,11 +2,13 @@ package mcpclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -41,6 +43,11 @@ var Module = fx.Module(
 )
 
 const defaultProbeTimeout = 2 * time.Second
+
+const (
+	defaultStartupProbeBackoffMin = 50 * time.Millisecond
+	defaultStartupProbeBackoffMax = time.Second
+)
 
 type clientParams struct {
 	fx.In
@@ -171,17 +178,28 @@ func probeMcpServer(p runnerParams) error {
 				slog.String("target", transportTargetLabel(transportKind, p.Config.ServerURL)),
 			)
 			go func() {
-				runStartupProbe(
-					ctx,
-					defaultProbeTimeout,
-					func(probeCtx context.Context) (probeSession, error) {
-						return connectStartupProbe(probeCtx, func(probeCtx context.Context) (probeSession, error) {
-							return p.Client.Connect(probeCtx, p.Transport, nil)
-						})
-					},
-					logger,
-					p.ProbeState,
-				)
+				connect := func(probeCtx context.Context) (probeSession, error) {
+					return connectStartupProbe(probeCtx, func(probeCtx context.Context) (probeSession, error) {
+						return p.Client.Connect(probeCtx, p.Transport, nil)
+					})
+				}
+				if p.Config.StartupWaitTimeout > 0 {
+					runStartupProbeWithRetry(
+						ctx,
+						startupProbeRetryOptions{
+							waitTimeout:           p.Config.StartupWaitTimeout,
+							probeTimeout:          defaultProbeTimeout,
+							backoffMin:            defaultStartupProbeBackoffMin,
+							backoffMax:            defaultStartupProbeBackoffMax,
+							retryUnixSocketENOENT: p.Config.UnixSocketPath != "",
+						},
+						connect,
+						logger,
+						p.ProbeState,
+					)
+					return
+				}
+				runStartupProbe(ctx, defaultProbeTimeout, connect, logger, p.ProbeState)
 			}()
 			return nil
 		},
@@ -206,7 +224,34 @@ func connectStartupProbe(ctx context.Context, connect func(context.Context) (pro
 		return session, nil
 	}
 	statusCode, _ := carrier.ResponseStatusAndHeaders()
+	if transportErr := carrier.TransportError(); statusCode == 0 && transportErr != nil {
+		err = &probeTransportError{
+			message: err.Error(),
+			cause:   transportErr,
+		}
+	}
 	return session, NewProbeHTTPStatusError(statusCode, err)
+}
+
+// probeTransportError retains the SDK's user-facing probe message while
+// restoring the underlying transport error chain that the MCP SDK flattens.
+type probeTransportError struct {
+	message string
+	cause   error
+}
+
+func (e *probeTransportError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func (e *probeTransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 func runStartupProbe(
@@ -240,42 +285,232 @@ func runStartupProbe(
 			logger.ErrorContext(ctx, "mcp probe timed out", slog.Duration("timeout", timeout), slog.String("error", err.Error()))
 		}
 	case res := <-resultCh:
-		if res.err != nil {
-			if probeState != nil {
-				probeState.Set(res.err)
+		recordStartupProbeResult(ctx, logger, probeState, startupProbeResult(res))
+	}
+}
+
+type startupProbeResult struct {
+	session probeSession
+	err     error
+}
+
+type startupProbeRetryWaiter func(context.Context, time.Duration) error
+
+type startupProbeRetryOptions struct {
+	waitTimeout           time.Duration
+	probeTimeout          time.Duration
+	backoffMin            time.Duration
+	backoffMax            time.Duration
+	retryUnixSocketENOENT bool
+	wait                  startupProbeRetryWaiter
+}
+
+// runStartupProbeWithRetry keeps ProbeState pending while the opt-in listener
+// wait sees retryable pre-connect failures. It never retries an HTTP response
+// or an application-level MCP failure, so already-polled commands are never
+// replayed by this startup path.
+func runStartupProbeWithRetry(
+	ctx context.Context,
+	options startupProbeRetryOptions,
+	connect func(context.Context) (probeSession, error),
+	logger *slog.Logger,
+	probeState *ProbeState,
+) {
+	if options.waitTimeout <= 0 {
+		runStartupProbe(ctx, options.probeTimeout, connect, logger, probeState)
+		return
+	}
+	if options.probeTimeout <= 0 {
+		options.probeTimeout = defaultProbeTimeout
+	}
+	if options.backoffMin <= 0 {
+		options.backoffMin = defaultStartupProbeBackoffMin
+	}
+	if options.backoffMax < options.backoffMin {
+		options.backoffMax = options.backoffMin
+	}
+	if options.wait == nil {
+		options.wait = waitForStartupProbeRetry
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, options.waitTimeout)
+	defer cancel()
+
+	backoff := options.backoffMin
+	attempt := 0
+	var lastErr error
+	for {
+		if err := waitCtx.Err(); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
 			}
-			if logger != nil {
-				logger.ErrorContext(ctx, "failed to connect to mcp", slog.String("error", res.err.Error()))
-			}
+			recordStartupWaitTimeout(ctx, logger, probeState, options.waitTimeout, lastErr)
 			return
 		}
+
+		attempt++
+		res, settled := runStartupProbeAttempt(waitCtx, options.probeTimeout, connect)
+		if !settled {
+			if errors.Is(waitCtx.Err(), context.Canceled) {
+				return
+			}
+			recordStartupWaitTimeout(ctx, logger, probeState, options.waitTimeout, lastErr)
+			return
+		}
+		if res.err == nil || !isRetryableStartupProbeError(res.err, options.retryUnixSocketENOENT) {
+			recordStartupProbeResult(ctx, logger, probeState, res)
+			return
+		}
+
+		lastErr = res.err
+		if logger != nil {
+			logger.WarnContext(ctx, "retrying MCP startup probe",
+				slog.Int("attempt", attempt),
+				slog.Duration("backoff", backoff),
+				slog.String("error", tclog.ErrorForLog(res.err)),
+			)
+		}
+		if err := options.wait(waitCtx, backoff); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(waitCtx.Err(), context.Canceled) {
+				return
+			}
+			recordStartupWaitTimeout(ctx, logger, probeState, options.waitTimeout, lastErr)
+			return
+		}
+		backoff = nextStartupProbeBackoff(backoff, options.backoffMax)
+	}
+}
+
+func runStartupProbeAttempt(
+	ctx context.Context,
+	timeout time.Duration,
+	connect func(context.Context) (probeSession, error),
+) (startupProbeResult, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	resultCh := make(chan startupProbeResult, 1)
+	go func() {
+		sess, err := connect(probeCtx)
+		res := startupProbeResult{session: sess, err: err}
+		select {
+		case resultCh <- res:
+		case <-probeCtx.Done():
+			if sess != nil {
+				_ = sess.Close()
+			}
+		}
+	}()
+
+	select {
+	case <-probeCtx.Done():
+		if ctx.Err() != nil {
+			return startupProbeResult{}, false
+		}
+		return startupProbeResult{err: NewProbeTimeoutError(timeout, probeCtx.Err())}, true
+	case res := <-resultCh:
+		return res, true
+	}
+}
+
+func waitForStartupProbeRetry(ctx context.Context, backoff time.Duration) error {
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func nextStartupProbeBackoff(current, maximum time.Duration) time.Duration {
+	if current <= 0 {
+		return defaultStartupProbeBackoffMin
+	}
+	if current >= maximum || current > maximum/2 {
+		return maximum
+	}
+	return current * 2
+}
+
+func isRetryableStartupProbeError(err error, retryUnixSocketENOENT bool) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr *ProbeHTTPStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode != 0 {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	return retryUnixSocketENOENT && errors.Is(err, syscall.ENOENT)
+}
+
+func recordStartupWaitTimeout(
+	ctx context.Context,
+	logger *slog.Logger,
+	probeState *ProbeState,
+	timeout time.Duration,
+	lastErr error,
+) {
+	if lastErr == nil {
+		lastErr = context.DeadlineExceeded
+	}
+	err := NewStartupWaitTimeoutError(timeout, lastErr)
+	if probeState != nil {
+		probeState.Set(err)
+	}
+	if logger != nil {
+		logger.ErrorContext(ctx, "MCP startup wait timed out",
+			slog.Duration("timeout", timeout),
+			slog.String("error", tclog.ErrorForLog(err)),
+		)
+	}
+}
+
+func recordStartupProbeResult(
+	ctx context.Context,
+	logger *slog.Logger,
+	probeState *ProbeState,
+	res startupProbeResult,
+) {
+	if res.err != nil {
 		if probeState != nil {
-			probeState.Set(nil)
-		}
-		if res.session == nil {
-			if logger != nil {
-				logger.WarnContext(ctx, "mcp probe returned nil session")
-			}
-			return
-		}
-		defer func() {
-			if err := res.session.Close(); err != nil && logger != nil {
-				logger.WarnContext(ctx, "failed to close mcp session", slog.String("error", err.Error()))
-			}
-		}()
-		initRes := res.session.InitializeResult()
-		logFields := []any{
-			slog.String("protocol_version", initRes.ProtocolVersion),
-		}
-		if initRes.ServerInfo != nil {
-			logFields = append(logFields, slog.String("server_name", initRes.ServerInfo.Name))
-			if initRes.ServerInfo.Version != "" {
-				logFields = append(logFields, slog.String("server_version", initRes.ServerInfo.Version))
-			}
+			probeState.Set(res.err)
 		}
 		if logger != nil {
-			logger.InfoContext(ctx, "mcp session initialized", logFields...)
+			logger.ErrorContext(ctx, "failed to connect to mcp", slog.String("error", res.err.Error()))
 		}
+		return
+	}
+	if probeState != nil {
+		probeState.Set(nil)
+	}
+	if res.session == nil {
+		if logger != nil {
+			logger.WarnContext(ctx, "mcp probe returned nil session")
+		}
+		return
+	}
+	defer func() {
+		if err := res.session.Close(); err != nil && logger != nil {
+			logger.WarnContext(ctx, "failed to close mcp session", slog.String("error", err.Error()))
+		}
+	}()
+	initRes := res.session.InitializeResult()
+	logFields := []any{
+		slog.String("protocol_version", initRes.ProtocolVersion),
+	}
+	if initRes.ServerInfo != nil {
+		logFields = append(logFields, slog.String("server_name", initRes.ServerInfo.Name))
+		if initRes.ServerInfo.Version != "" {
+			logFields = append(logFields, slog.String("server_version", initRes.ServerInfo.Version))
+		}
+	}
+	if logger != nil {
+		logger.InfoContext(ctx, "mcp session initialized", logFields...)
 	}
 }
 

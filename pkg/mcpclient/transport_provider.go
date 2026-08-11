@@ -80,7 +80,7 @@ func (p stdioTransportProvider) Build(params TransportBuildParams) (mcp.Transpor
 	if err != nil {
 		return nil, err
 	}
-	return newSharedConnectionTransport(transport), nil
+	return newContextCancellationPreservingSharedConnectionTransport(transport), nil
 }
 
 func selectTransportProvider(kind config.MCPTransportKind, providers []TransportProvider) (TransportProvider, error) {

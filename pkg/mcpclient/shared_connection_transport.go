@@ -9,9 +9,10 @@ import (
 )
 
 type sharedConnectionTransport struct {
-	base mcp.Transport
-	mu   sync.Mutex
-	conn mcp.Connection
+	base                          mcp.Transport
+	preserveOnContextCancellation bool
+	mu                            sync.Mutex
+	conn                          mcp.Connection
 }
 
 // NewSharedConnectionTransport returns a transport wrapper that reuses the
@@ -21,10 +22,25 @@ func NewSharedConnectionTransport(base mcp.Transport) mcp.Transport {
 }
 
 func newSharedConnectionTransport(base mcp.Transport) mcp.Transport {
+	return newSharedConnectionTransportWithContextCancellationPolicy(base, false)
+}
+
+// newContextCancellationPreservingSharedConnectionTransport keeps the shared
+// physical connection open when one logical request context expires. Stdio
+// uses this because all logical connections reuse the same child-process
+// stdin/stdout pipes.
+func newContextCancellationPreservingSharedConnectionTransport(base mcp.Transport) mcp.Transport {
+	return newSharedConnectionTransportWithContextCancellationPolicy(base, true)
+}
+
+func newSharedConnectionTransportWithContextCancellationPolicy(base mcp.Transport, preserveOnContextCancellation bool) mcp.Transport {
 	if base == nil {
 		return nil
 	}
-	return &sharedConnectionTransport{base: base}
+	return &sharedConnectionTransport{
+		base:                          base,
+		preserveOnContextCancellation: preserveOnContextCancellation,
+	}
 }
 
 func (t *sharedConnectionTransport) Connect(ctx context.Context) (mcp.Connection, error) {
@@ -44,7 +60,8 @@ func (t *sharedConnectionTransport) Connect(ctx context.Context) (mcp.Connection
 	}
 	var sharedConn *sharedConnection
 	sharedConn = &sharedConnection{
-		base: conn,
+		base:                          conn,
+		preserveOnContextCancellation: t.preserveOnContextCancellation,
 		onClose: func() {
 			t.mu.Lock()
 			defer t.mu.Unlock()
@@ -59,8 +76,13 @@ func (t *sharedConnectionTransport) Connect(ctx context.Context) (mcp.Connection
 }
 
 type sharedConnection struct {
-	base    mcp.Connection
-	onClose func()
+	base                          mcp.Connection
+	preserveOnContextCancellation bool
+	onClose                       func()
+}
+
+func (c *sharedConnection) preserveConnectionOnContextCancellation() bool {
+	return c != nil && c.preserveOnContextCancellation
 }
 
 func (c *sharedConnection) Read(ctx context.Context) (jsonrpc.Message, error) {

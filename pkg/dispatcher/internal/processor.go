@@ -39,6 +39,7 @@ var legacyRequiredProcessorChannels = []types.Channel{
 }
 
 var errResponseDeadlineExceeded = errors.New("tunnel response deadline exceeded")
+var errConnectionTTLExceeded = errors.New("MCP connection TTL exceeded")
 
 // Processor forwards polled control plane commands to the downstream MCP server.
 type Processor interface {
@@ -381,6 +382,25 @@ func (p *mcpProcessor) Process(ctx context.Context, cmd controlplane.PolledComma
 	}
 }
 
+func responseDeadlineReached(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errResponseDeadlineExceeded)
+}
+
+func connectionTTLReached(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errConnectionTTLExceeded)
+}
+
+func retireExpiredResponseConnection(ctx context.Context, conn mcpclient.ForwardingConnection) bool {
+	if !responseDeadlineReached(ctx) {
+		return false
+	}
+	retiring, ok := conn.(mcpclient.ResponseDeadlineRetiringConnection)
+	if !ok {
+		return false
+	}
+	return retiring.RetireResponseDeadline()
+}
+
 func (p *mcpProcessor) rejectUnsupportedChannel(ctx context.Context, logger *slog.Logger, cmd controlplane.PolledCommand, channel types.Channel) error {
 	statusCode := http.StatusBadRequest
 	err := fmt.Errorf("unsupported channel %q", channel)
@@ -521,8 +541,10 @@ func (p *mcpProcessor) processJsonRpcCommand(ctx context.Context, logger *slog.L
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
-		if closeErr := conn.Close(); closeErr != nil {
-			logger.WarnContext(ctx, "failed to close MCP connection after context cancellation", slog.String("error", closeErr.Error()))
+		if !retireExpiredResponseConnection(ctx, conn) {
+			if closeErr := conn.Close(); closeErr != nil {
+				logger.WarnContext(ctx, "failed to close MCP connection after context cancellation", slog.String("error", closeErr.Error()))
+			}
 		}
 		return err
 	}
@@ -530,8 +552,10 @@ func (p *mcpProcessor) processJsonRpcCommand(ctx context.Context, logger *slog.L
 	headers := ensureDefaultAcceptHeader(cmd.Headers())
 	writeResult, err := conn.Write(ctx, headers, req)
 	if ctx.Err() != nil {
-		if closeErr := conn.Close(); closeErr != nil {
-			logger.WarnContext(ctx, "failed to close MCP connection after context cancellation", slog.String("error", closeErr.Error()))
+		if !retireExpiredResponseConnection(ctx, conn) {
+			if closeErr := conn.Close(); closeErr != nil {
+				logger.WarnContext(ctx, "failed to close MCP connection after context cancellation", slog.String("error", closeErr.Error()))
+			}
 		}
 		return ctx.Err()
 	}
@@ -773,14 +797,17 @@ func (p *mcpProcessor) forwardResponses(ctx context.Context, conn mcpclient.Forw
 	ttlCtx := ctx
 	cancel := func() {}
 	if p.connectionMaxTTL > 0 {
-		ttlCtx, cancel = context.WithTimeout(ctx, p.connectionMaxTTL)
+		ttlCtx, cancel = context.WithTimeoutCause(ctx, p.connectionMaxTTL, errConnectionTTLExceeded)
 	}
 	defer cancel()
 
 	terminalResponseDelivered := false
 	mcpResponseReceived := false
 	defer func() {
-		if terminalResponseDelivered || (mcpResponseReceived && errors.Is(context.Cause(ctx), errResponseDeadlineExceeded)) {
+		if terminalResponseDelivered || (mcpResponseReceived && responseDeadlineReached(ttlCtx)) {
+			return
+		}
+		if retireExpiredResponseConnection(ttlCtx, conn) {
 			return
 		}
 		if err := conn.Close(); err != nil {
@@ -808,7 +835,7 @@ func (p *mcpProcessor) forwardResponses(ctx context.Context, conn mcpclient.Forw
 		if post.err != nil {
 			attrs := post.errorAttrs()
 			if errors.Is(post.err, context.DeadlineExceeded) || errors.Is(post.err, context.Canceled) {
-				if errors.Is(ttlCtx.Err(), context.DeadlineExceeded) {
+				if connectionTTLReached(ttlCtx) {
 					logger.InfoContext(ctx, "MCP connection TTL reached while delivering terminal error response", attrs...)
 				} else {
 					logger.DebugContext(ctx, "MCP connection context canceled while delivering terminal error response", attrs...)
@@ -838,7 +865,7 @@ func (p *mcpProcessor) forwardResponses(ctx context.Context, conn mcpclient.Forw
 				logger.DebugContext(ctx, "MCP connection closed while reading response", tunnelFailureLogAttrs(classifyTunnelFailure(0, readErr), classifyTransportErrorKind(0, readErr))...)
 				postTerminalErrorResponse(readErr)
 			case errors.Is(readErr, context.DeadlineExceeded), errors.Is(readErr, context.Canceled):
-				if errors.Is(ttlCtx.Err(), context.DeadlineExceeded) {
+				if connectionTTLReached(ttlCtx) {
 					logger.InfoContext(ctx, "MCP connection TTL reached; stopping response forwarding")
 				} else {
 					logger.DebugContext(ctx, "MCP connection context canceled while reading response")
@@ -926,7 +953,7 @@ func (p *mcpProcessor) forwardResponses(ctx context.Context, conn mcpclient.Forw
 		if post.err != nil {
 			attrs := post.errorAttrs()
 			if errors.Is(post.err, context.DeadlineExceeded) || errors.Is(post.err, context.Canceled) {
-				if errors.Is(ttlCtx.Err(), context.DeadlineExceeded) {
+				if connectionTTLReached(ttlCtx) {
 					logger.InfoContext(ctx, "MCP connection TTL reached while delivering response", attrs...)
 				} else {
 					logger.DebugContext(ctx, "MCP connection context canceled while delivering response", attrs...)

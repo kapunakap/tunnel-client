@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/mcpclient"
 	"github.com/openai/tunnel-client/pkg/types"
 )
 
@@ -81,6 +82,10 @@ func TestNewProcessorChannelBindingsSerializesStdioTransport(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Contains(t, fmt.Sprintf("%T", bindings[types.DefaultChannel].Transport), "serializedForwardingTransport")
+	conn, err := bindings[types.DefaultChannel].Transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, ok := conn.(mcpclient.ResponseDeadlineRetiringConnection)
+	require.True(t, ok, "stdio binding must retire deadlines without closing its shared transport")
 }
 
 func TestNewProcessorChannelBindingsMissingRequired(t *testing.T) {

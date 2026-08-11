@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -147,7 +148,7 @@ func (c *forwardingConnection) Write(ctx context.Context, header http.Header, ms
 		result.StatusCode, result.ResponseHeaders = carrier.ResponseStatusAndHeaders()
 	}
 
-	if err != nil {
+	if err != nil && shouldCloseAfterForwardingError(c.base, ctx, err) {
 		_ = c.base.Close()
 	}
 
@@ -230,8 +231,26 @@ func (c *forwardingConnection) Read(ctx context.Context) (jsonrpc.Message, error
 		return nil, nil
 	}
 	msg, err := c.base.Read(ctx)
-	if err != nil {
+	if err != nil && shouldCloseAfterForwardingError(c.base, ctx, err) {
 		_ = c.base.Close()
 	}
 	return msg, err
+}
+
+type contextCancellationPreservingConnection interface {
+	preserveConnectionOnContextCancellation() bool
+}
+
+func shouldCloseAfterForwardingError(conn mcp.Connection, ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if !hasResponseDeadlineEnforcement(ctx) {
+		return true
+	}
+	preserving, ok := conn.(contextCancellationPreservingConnection)
+	return !ok || !preserving.preserveConnectionOnContextCancellation()
 }

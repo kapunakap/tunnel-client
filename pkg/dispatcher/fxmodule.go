@@ -188,8 +188,12 @@ func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Ch
 			transport = mcpclient.NewForwardingTransport(binding.Transport)
 			// Stdio and Harpoon reuse a single underlying connection. Keep one
 			// request lifecycle active at a time so concurrent workers cannot
-			// consume another request's JSON-RPC response.
-			if canonical == types.ChannelHarpoon || binding.TransportKind == config.MCPTransportStdio {
+			// consume another request's JSON-RPC response. Stdio also keeps its
+			// child-process pipes alive when one request deadline expires and
+			// filters that request's late response before the next lifecycle.
+			if binding.TransportKind == config.MCPTransportStdio {
+				transport = mcpclient.NewSerializedForwardingTransportWithDeadlineRetirement(transport)
+			} else if canonical == types.ChannelHarpoon {
 				transport = mcpclient.NewSerializedForwardingTransport(transport)
 			}
 		}

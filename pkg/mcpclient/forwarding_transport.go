@@ -37,11 +37,26 @@ type ForwardingConnection interface {
 
 	Read(ctx context.Context) (jsonrpc.Message, error)
 
-	// Close closes the connection. It is implicitly called whenever a Read or
-	// Write fails.
+	// Close closes the connection. It is implicitly called for non-context
+	// Read or Write failures. Shared deadline-retiring connections may preserve
+	// their physical transport when one request context expires.
 	//
 	// Close may be called multiple times, potentially concurrently.
 	Close() error
+}
+
+// ResponseDeadlineRetiringConnection can retire one timed-out request
+// lifecycle without closing a shared physical transport. Implementations must
+// discard any later response for the retired request before another request can
+// observe it.
+//
+// RetireResponseDeadline is idempotent. Callers should use it only after a
+// response deadline or equivalent per-request forwarding window expires. It
+// returns true when the logical request was retired without closing the
+// physical transport; false means the caller should keep its normal close
+// path.
+type ResponseDeadlineRetiringConnection interface {
+	RetireResponseDeadline() bool
 }
 
 // ForwardingWriteResult is the downstream HTTP result observed while writing

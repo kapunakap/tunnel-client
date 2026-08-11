@@ -336,6 +336,101 @@ func TestForwardingConnectionReadErrorClosesBase(t *testing.T) {
 	}
 }
 
+func TestForwardingConnectionContextCancellationPreservesConfiguredSharedBase(t *testing.T) {
+	t.Parallel()
+
+	base := &fakeConnection{
+		readFunc: func(ctx context.Context) (jsonrpc.Message, error) {
+			return nil, ctx.Err()
+		},
+	}
+	connectCalls := 0
+	shared := newContextCancellationPreservingSharedConnectionTransport(contextCapturingTransport{
+		connect: func(context.Context) (mcp.Connection, error) {
+			connectCalls++
+			return base, nil
+		},
+	})
+	transport := NewForwardingTransport(shared)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx = ContextWithResponseDeadlineEnforcement(ctx)
+
+	msg, err := conn.Read(ctx)
+	require.Nil(t, msg)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, base.closeCalls, "request cancellation must not close the shared physical connection")
+
+	next, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, 1, connectCalls, "preserved shared connection must remain cached")
+}
+
+func TestForwardingConnectionWriteContextCancellationPreservesConfiguredSharedBase(t *testing.T) {
+	t.Parallel()
+
+	base := &fakeConnection{
+		writeFunc: func(ctx context.Context, _ jsonrpc.Message) error {
+			return ctx.Err()
+		},
+	}
+	connectCalls := 0
+	shared := newContextCancellationPreservingSharedConnectionTransport(contextCapturingTransport{
+		connect: func(context.Context) (mcp.Connection, error) {
+			connectCalls++
+			return base, nil
+		},
+	})
+	transport := NewForwardingTransport(shared)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx = ContextWithResponseDeadlineEnforcement(ctx)
+	_, err = conn.Write(ctx, nil, &jsonrpc.Request{ID: mustMakeID(t, "canceled-write"), Method: "tools/call"})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, base.closeCalls, "request cancellation must not close the shared physical connection")
+
+	next, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, 1, connectCalls, "preserved shared connection must remain cached")
+}
+
+func TestForwardingConnectionUnmarkedContextCancellationStillClosesConfiguredSharedBase(t *testing.T) {
+	t.Parallel()
+
+	base := &fakeConnection{
+		readFunc: func(ctx context.Context) (jsonrpc.Message, error) {
+			return nil, ctx.Err()
+		},
+	}
+	shared := newContextCancellationPreservingSharedConnectionTransport(contextCapturingTransport{
+		connect: func(context.Context) (mcp.Connection, error) {
+			return base, nil
+		},
+	})
+	transport := NewForwardingTransport(shared)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = conn.Read(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, base.closeCalls, "legacy unmarked cancellation keeps the normal close path")
+}
+
 func TestForwardingTransportConnectNilBaseReturnsNil(t *testing.T) {
 	t.Parallel()
 

@@ -32,6 +32,12 @@ while IFS= read -r line; do
       if [[ -n "${MOCK_MCP_INVOCATION_LOG:-}" ]]; then
         printf '%s\n' "$request_id" >> "$MOCK_MCP_INVOCATION_LOG"
       fi
+      if [[ -n "${MOCK_MCP_DROP_RESPONSE_NAME:-}" && "$name" == "$MOCK_MCP_DROP_RESPONSE_NAME" ]]; then
+        continue
+      fi
+      if [[ -n "${MOCK_MCP_SERVER_REQUEST_BEFORE_RESPONSE_NAME:-}" && "$name" == "$MOCK_MCP_SERVER_REQUEST_BEFORE_RESPONSE_NAME" ]]; then
+        printf '{"jsonrpc":"2.0","id":"late-server-request","method":"sampling/createMessage","params":{"messages":[],"maxTokens":1}}\n'
+      fi
       message="hello $name"
       printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}],"structuredContent":{"message":"%s"}}}\n' "$id" "$message" "$message"
       ;;

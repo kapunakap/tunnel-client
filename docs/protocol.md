@@ -273,10 +273,19 @@ must not derive this deadline from `created_at`. The deadline bounds the whole
 command lifecycle: MCP connect, write, read, and the response POST. Drop a
 command that is already expired without contacting MCP or posting a response.
 If the deadline passes during MCP work, cancel the operation and close its
-connection. If it passes after MCP completes, cancel the response POST without
-closing a shared connection that may already serve another command. Never
-synthesize a late error response. Progress notifications do not restart the
-deadline.
+connection unless the shared stdio exception below applies. If it passes after
+MCP completes, cancel the response POST without closing a shared connection
+that may already serve another command. Never synthesize a late error response.
+Progress notifications do not restart the deadline.
+
+For a shared stdio binding, a non-`initialize` response deadline is an
+exception to closing the connection: keep the process-affine child pipes open,
+retire the timed-out JSON-RPC ID before admitting later work, and discard any
+later response for that ID so it cannot be mistaken for the next command. While
+a retired response remains outstanding, downstream server requests and
+notifications are ambiguous and may be dropped, but later terminal responses
+continue by ID. An `initialize` deadline remains fail-closed because
+initialization cannot be safely cancelled or replayed.
 
 ### `jsonrpc` commands
 

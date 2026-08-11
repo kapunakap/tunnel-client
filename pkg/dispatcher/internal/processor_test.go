@@ -287,6 +287,58 @@ func TestProcessorDeadlineDuringReadClosesMCPAndPostsNothing(t *testing.T) {
 	require.Contains(t, logs.String(), "command response deadline reached; dropping without posting a response")
 }
 
+func TestProcessorDeadlineDuringReadRetiresSharedMCPAndPostsNothing(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	conn := newDeadlineRetiringConnection()
+	transport := &stubForwardingTransport{conn: conn}
+	responder := &countingResponder{}
+	processor := newDeadlineTestProcessor(t, transport, responder)
+	processor.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	var expire context.CancelCauseFunc
+	processor.withDeadlineCause = func(ctx context.Context, _ time.Time, cause error) (context.Context, context.CancelFunc) {
+		deadlineCtx, cancelCause := context.WithCancelCause(ctx)
+		expire = cancelCause
+		return deadlineCtx, func() { cancelCause(context.Canceled) }
+	}
+	id, err := jsonrpc.MakeID("retired-blocking-read")
+	require.NoError(t, err)
+	command := &fakePolledCommand{
+		id:                  "retired-blocking-read-command",
+		message:             &jsonrpc.Request{ID: id, Method: "tools/list"},
+		shardToken:          "retired-blocking-read-shard",
+		responseDeadline:    time.Now().Add(time.Hour),
+		hasResponseDeadline: true,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- processor.Process(context.Background(), command) }()
+	waitForSignal(t, conn.readStarted, "MCP read to start")
+	expire(errResponseDeadlineExceeded)
+	require.NoError(t, waitForResult(t, done, "processor to stop after deadline"))
+	require.True(t, conn.retired.Load(), "response deadline must retire shared MCP lifecycle")
+	select {
+	case <-conn.closed:
+		t.Fatal("response deadline must not close shared MCP connection")
+	default:
+	}
+	require.Zero(t, responder.calls.Load(), "deadline expiry must not synthesize a response")
+	require.Contains(t, logs.String(), "command response deadline reached; dropping without posting a response")
+	require.NotContains(t, logs.String(), "MCP connection TTL reached")
+}
+
+func TestRetireExpiredResponseConnectionIgnoresConnectionTTL(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errConnectionTTLExceeded)
+	conn := newDeadlineRetiringConnection()
+
+	require.False(t, retireExpiredResponseConnection(ctx, conn))
+	require.False(t, conn.retired.Load(), "connection TTL must keep the normal close path")
+}
+
 func TestProcessorDoesNotSwallowEarlierParentDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -3725,6 +3777,11 @@ type deadlineBlockingConnection struct {
 	closeOnce   sync.Once
 }
 
+type deadlineRetiringConnection struct {
+	*deadlineBlockingConnection
+	retired atomic.Bool
+}
+
 type responseThenTrackCloseConnection struct {
 	response jsonrpc.Message
 	closed   atomic.Bool
@@ -3775,6 +3832,17 @@ func newDeadlineBlockingConnection() *deadlineBlockingConnection {
 		readStarted: make(chan struct{}),
 		closed:      make(chan struct{}),
 	}
+}
+
+func newDeadlineRetiringConnection() *deadlineRetiringConnection {
+	return &deadlineRetiringConnection{
+		deadlineBlockingConnection: newDeadlineBlockingConnection(),
+	}
+}
+
+func (c *deadlineRetiringConnection) RetireResponseDeadline() bool {
+	c.retired.Store(true)
+	return true
 }
 
 func (c *deadlineBlockingConnection) Write(context.Context, http.Header, jsonrpc.Message) (mcpclient.ForwardingWriteResult, error) {

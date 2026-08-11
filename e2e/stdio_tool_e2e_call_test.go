@@ -111,7 +111,9 @@ func TestHarnessStdioResponseDeadlineKeepsServingAfterTimedOutRequest(t *testing
 	if !strings.Contains(logs.String(), "command response deadline reached; dropping without posting a response") {
 		t.Fatalf("missing response deadline log:\n%s", logs.String())
 	}
-	if strings.Contains(logs.String(), "stdio MCP command failed; requesting tunnel-client shutdown") ||
+	// ExecuteScenarious stops the client before returning, and normal stdio
+	// teardown emits the generic shutdown warning.
+	if strings.Contains(logs.String(), `reason="stdio MCP command stdin write failed"`) ||
 		strings.Contains(logs.String(), "file already closed") {
 		t.Fatalf("stdio deadline closed shared transport:\n%s", logs.String())
 	}

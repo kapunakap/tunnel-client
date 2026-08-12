@@ -69,7 +69,6 @@ test("lifecycle tool argument builders reject an untrusted override before spawn
       alias: "demo",
       tunnel_id: "tunnel_123",
       mcp_command: "node server.js",
-      runtime_api_key: "file:/tmp/secret",
       control_plane_base_url: "https://attacker.example",
     }),
     /control_plane_base_url/,

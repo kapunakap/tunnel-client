@@ -31,49 +31,20 @@ version tags and commit SHA. Semver build metadata (`+...`) is rejected
 because Docker tags cannot represent it. The image build uses Buildx cache,
 emits an SBOM attestation, and records signed GitHub artifact provenance.
 
-Homebrew Formula tooling is available for deterministic rendering and explicit
-test publishes, but production tap publication is not wired into the release
-workflow yet. Add that integration only after the tap bootstrap and scoped
-GitHub App credential path are provisioned. Do not document
-`brew install openai/tools/tunnel-client` as supported before a compatible
-stable Formula is present in the tap.
+The supported Homebrew installation path is documented in
+[`../README.md#install-with-homebrew`](../README.md#install-with-homebrew).
 
-The stable-only `publish_latest_homebrew_formula.sh` wrapper is the handoff for
-that future private publisher. It reads only the latest published,
-non-draft/non-prerelease `v<semver>` GitHub release, downloads the public
-checksum manifest, renders the Formula, and calls
-`publish_homebrew_formula.sh` to open a Formula-only tap PR without merging it.
-Keep the credentials split: `TUNNEL_CLIENT_RELEASE_READ_TOKEN` is an optional
-read-only GitHub token for the release API, while
-`OPENAI_GITHUB_INSTALLATION_TOKEN_FILE` is the preferred private-CI input:
-a mounted GitHub App installation-token JSON file scoped to
-`openai/homebrew-tools` with only `contents:write` and
-`pull_requests:write`. `OPENAI_GITHUB_INSTALLATION_TOKEN_JSON` remains
-available for local testing.
-
-For an approved private-CI publisher invocation:
-
-```bash
-TUNNEL_CLIENT_RELEASE_READ_TOKEN=<read-only-github-token> \
-OPENAI_GITHUB_INSTALLATION_TOKEN_FILE=/etc/secrets/github-installation-token/token-json \
-bash ./scripts/publish_latest_homebrew_formula.sh
-```
-
-Exercise the deterministic renderer, tap-PR publisher, and stable wrapper with:
+Exercise the deterministic Formula renderer with:
 
 ```bash
 bash ./scripts/generate_homebrew_formula_test.sh
-bash ./scripts/publish_homebrew_formula_test.sh
-bash ./scripts/publish_latest_homebrew_formula_test.sh
 ```
 
 The standalone `Homebrew formula smoke` workflow downloads checksums from an
 already-published release, renders the Formula, and runs `brew readall`,
-`brew install`, and `brew test` without uploading artifacts, creating a
-release, or minting a tap write token. For an explicit remote draft publish,
-run `publish_homebrew_formula.sh --draft` with human `gh` auth and a
-`test-tunnel-client-*` branch. `--allow-prerelease` exists only for these
-test paths; normal stable publication continues to reject prereleases.
+`brew install`, and `brew test` without uploading artifacts or creating a
+release. `--allow-prerelease` exists only for explicit test paths; stable
+Formula generation continues to reject prereleases.
 
 ## Unit tests
 

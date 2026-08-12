@@ -9,12 +9,46 @@ const SERVER_NAME = "tunnel-mcp";
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
 const SERVER_VERSION = readPluginVersion();
 const MAX_STDIO_COMMAND_LENGTH = 4096;
+const MAX_ESCAPED_JSON_PASSES = 4;
+const MAX_KNOWN_SECRETS = 256;
+const MAX_KNOWN_SECRET_CHARS = 16384;
+const MAX_REDACTION_DEPTH = 128;
+const MAX_EMBEDDED_JSON_CANDIDATES = 64;
+const MAX_EMBEDDED_JSON_CANDIDATE_CHARS = 65536;
+const REDACTED = "[REDACTED]";
 const BIN_HINT_PATH = path.join(PLUGIN_ROOT, ".tunnel-client-bin");
 const ALLOWED_CONTROL_PLANE_ORIGINS = new Set([
   "https://api.openai.com",
   "https://mtls.api.openai.com",
 ]);
 const CONTROL_PLANE_BASE_URL_ENV = "CONTROL_PLANE_BASE_URL";
+const OPENAI_STYLE_SECRET_PATTERN = "\\bsk-[A-Za-z0-9][A-Za-z0-9_-]{11,}\\b";
+const PRIVATE_KEY_PEM_PATTERN =
+  "-----BEGIN (?:OPENSSH |RSA |EC |DSA |ENCRYPTED )?PRIVATE KEY-----[\\s\\S]*?" +
+  "-----END (?:OPENSSH |RSA |EC |DSA |ENCRYPTED )?PRIVATE KEY-----";
+const BEARER_SECRET_PATTERN = "\\b(Bearer\\s+)([^\\s,;]+)";
+const URL_USERINFO_PATTERN = "(://)([^\\s/@]+)(@)";
+const QUOTED_OR_BARE_VALUE_PATTERN =
+  "(?:\"((?:\\\\.|[^\"\\\\])*)\"|'((?:''|\\\\.|[^'\\\\])*)'|([^\\s]+))";
+const SENSITIVE_ASSIGNMENT_PATTERN =
+  "(\\b([A-Za-z_][A-Za-z0-9_-]*(?:\\[[A-Za-z0-9_.-]*\\])*)\\s*=\\s*)" + QUOTED_OR_BARE_VALUE_PATTERN;
+const SENSITIVE_FLAG_PATTERN =
+  "((?:^|\\s)(-{1,2}[A-Za-z0-9._-]+)(?:=|\\s+))" + QUOTED_OR_BARE_VALUE_PATTERN;
+const SENSITIVE_JSON_VALUE_PATTERN =
+  "(?:\"((?:\\\\.|[^\"\\\\])*)\"|'((?:''|\\\\.|[^'\\\\])*)'|([^\\s{\\[]+))";
+const SENSITIVE_JSON_PATTERN =
+  "(\"([A-Za-z0-9_.-]+)\"\\s*:\\s*)" + SENSITIVE_JSON_VALUE_PATTERN;
+const SENSITIVE_YAML_SCALAR_PATTERN =
+  "(^|[^A-Za-z0-9_])([\"'])([A-Za-z0-9_][A-Za-z0-9_.-]*)\\2\\s*:\\s*" +
+  SENSITIVE_JSON_VALUE_PATTERN;
+const NEXT_HEADER_PATTERN =
+  "(?=\\s+(?:(?:--header|-H)\\s+[\"']?)?[A-Za-z][A-Za-z0-9_.-]*\\s*:|\\r?\\n|$)";
+const SENSITIVE_HEADER_PATTERN =
+  "(\\b([A-Za-z][A-Za-z0-9_.-]*)\\s*:\\s*)(?:\"((?:\\\\.|[^\"\\\\])*)\"|'((?:\\\\.|[^'\\\\])*)'|([^\\r\\n]*?))" +
+  NEXT_HEADER_PATTERN;
+const YAML_BLOCK_PATTERN =
+  "(^|[^A-Za-z0-9_])([ \\t]*)([\"']?)([A-Za-z0-9_][A-Za-z0-9_.-]*)\\3\\s*:\\s*[|>](?:[1-9][-+]?|[-+][1-9]?)?\\s*\\r?\\n" +
+  "((?:(?:[ \\t]+.*(?:\\r?\\n|$))|(?:[ \\t]*\\r?\\n))+)";
 
 const NORMALIZED_KEYS = [
   "tunnel_id",
@@ -324,6 +358,8 @@ function runLifecycleTool(operation, args, buildArgs) {
         `tunnel-client exited with status ${completed.status}`,
     );
     err.payload = payload;
+    err.redactionSecrets = newSecretSet();
+    collectSensitiveStringValues(completed.stdout, err.redactionSecrets);
     throw err;
   }
 
@@ -762,6 +798,11 @@ function validateStdioCommand(value) {
   if (command.length > MAX_STDIO_COMMAND_LENGTH) {
     throw new Error(`mcp_command must be at most ${MAX_STDIO_COMMAND_LENGTH} characters`);
   }
+  if (containsInlineSecret(command)) {
+    throw new Error(
+      "mcp_command must not contain inline secret values; use env:NAME or file:/path references",
+    );
+  }
 }
 
 function validateRuntimeAPIKey(value) {
@@ -769,7 +810,10 @@ function validateRuntimeAPIKey(value) {
   if (!ref) {
     return;
   }
-  if (!ref.startsWith("env:") && !ref.startsWith("file:")) {
+  if (
+    (!/^env:[A-Za-z_][A-Za-z0-9_]*$/.test(ref) && !/^file:.+$/.test(ref)) ||
+    containsInlineSecret(ref)
+  ) {
     throw new Error("runtime_api_key must be a secret reference such as env:NAME or file:/path");
   }
 }
@@ -894,6 +938,1478 @@ function stringOrNull(value) {
   return text || null;
 }
 
+function containsInlineSecret(value) {
+  const secrets = newSecretSet();
+  collectSensitiveStringValues(String(value || ""), secrets, true);
+  return secrets.overflow || secrets.size > 0;
+}
+
+function redactSensitiveString(value, knownSecrets = new Set()) {
+  const original = String(value || "");
+  if (knownSecrets.overflow) {
+    return REDACTED;
+  }
+  const redactedOriginal = redactSensitiveStringPass(original, knownSecrets);
+  let candidate = redactedOriginal;
+
+  for (let pass = 1; pass <= MAX_ESCAPED_JSON_PASSES; pass += 1) {
+    const unescapedJSON = unescapeJSONQuotes(candidate);
+    if (unescapedJSON === candidate) {
+      break;
+    }
+    const redactedUnescaped = redactSensitiveStringPass(unescapedJSON, knownSecrets);
+    if (redactedUnescaped !== unescapedJSON) {
+      return redactedUnescaped;
+    }
+    candidate = unescapedJSON;
+  }
+
+  return redactedOriginal;
+}
+
+function redactSensitiveStringPass(value, knownSecrets) {
+  let text = String(value || "");
+  if (hasUnparseableSensitiveJSONContainer(text)) {
+    return REDACTED;
+  }
+
+  for (const secret of [...knownSecrets].sort((left, right) => right.length - left.length)) {
+    if (secret && secret !== REDACTED) {
+      text = text.split(secret).join(REDACTED);
+    }
+  }
+
+  text = text.replace(new RegExp(OPENAI_STYLE_SECRET_PATTERN, "g"), REDACTED);
+  text = text.replace(new RegExp(PRIVATE_KEY_PEM_PATTERN, "gi"), REDACTED);
+  text = text.replace(
+    new RegExp(BEARER_SECRET_PATTERN, "gi"),
+    (match, prefix, secret) => isSecretReference(secret) ? match : prefix + REDACTED,
+  );
+  text = redactEmbeddedJSON(text, knownSecrets);
+  text = redactYAMLBlocks(text);
+  text = text.replace(new RegExp(SENSITIVE_ASSIGNMENT_PATTERN, "gi"), redactSensitiveAssignmentMatch);
+  text = text.replace(new RegExp(SENSITIVE_FLAG_PATTERN, "gi"), redactSensitiveFlagMatch);
+  text = text.replace(new RegExp(SENSITIVE_JSON_PATTERN, "gi"), redactSensitiveJSONMatch);
+  text = redactSensitiveYAMLScalars(text);
+  text = redactSensitiveHeaders(text);
+  text = text.replace(
+    new RegExp(URL_USERINFO_PATTERN, "gi"),
+    (_match, scheme, _userinfo, at) => scheme + REDACTED + at,
+  );
+  return text;
+}
+
+function redactSensitiveValue(value, key = "", knownSecrets, depth = 0) {
+  const secrets = knownSecrets || newSecretSet();
+  if (depth >= MAX_REDACTION_DEPTH) {
+    return value === null || value === undefined ? value : REDACTED;
+  }
+  if (isCommandFieldName(key)) {
+    if (Array.isArray(value)) {
+      return redactCommandArgs(value, secrets, depth);
+    }
+    if (typeof value === "string") {
+      return redactCommandString(value, key, secrets);
+    }
+    return value === null || value === undefined ? value : REDACTED;
+  }
+  if (
+    isSensitiveFieldName(key) &&
+    !isNonSecretConfigurationName(key, value) &&
+    value !== null &&
+    value !== undefined
+  ) {
+    if (
+      typeof value === "string" &&
+      isSafeSecretLocator(key, value)
+    ) {
+      return value;
+    }
+    return redactSensitiveSubtree(value, depth);
+  }
+  if (typeof value === "string") {
+    return redactSensitiveString(value, secrets);
+  }
+  if (Array.isArray(value)) {
+    if (isSensitiveEntryTuple(value, key)) {
+      return redactSensitiveEntryTuple(value, secrets, depth);
+    }
+    return value.map((entry) => redactSensitiveValue(entry, "", secrets, depth + 1));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const out = {};
+  const commandTarget = value.target_kind === "command";
+  const sensitiveNameValue = sensitiveSiblingName(value);
+  for (const [nestedKey, nestedValue] of Object.entries(value)) {
+    const redactedKey = redactSensitivePropertyName(nestedKey, secrets);
+    if (commandTarget && nestedKey === "target_value") {
+      out[redactedKey] = nestedValue === null || nestedValue === undefined ? nestedValue : REDACTED;
+      continue;
+    }
+    if (sensitiveNameValue && nestedKey === "value") {
+      out[redactedKey] =
+        typeof nestedValue === "string" && isSafeSecretLocator(sensitiveNameValue, nestedValue)
+          ? nestedValue
+          : nestedValue === null || nestedValue === undefined
+            ? nestedValue
+            : REDACTED;
+      continue;
+    }
+    out[redactedKey] = redactSensitiveValue(nestedValue, nestedKey, secrets, depth + 1);
+  }
+  return out;
+}
+
+function redactSensitivePropertyName(key, secrets) {
+  const text = String(key || "");
+  if (isLikelySecretPropertyValue(text) && !isSensitiveFieldName(text)) {
+    return REDACTED;
+  }
+  return redactSensitiveString(text, secrets);
+}
+
+function isLikelySecretPropertyValue(key) {
+  const text = String(key || "");
+  return (
+    new RegExp(OPENAI_STYLE_SECRET_PATTERN).test(text) ||
+    isSensitiveName(text)
+  );
+}
+
+function redactCommandArgs(value, secrets, depth = 0) {
+  const out = value.map((entry) => redactSensitiveValue(entry, "", secrets, depth + 1));
+  for (let index = 0; index < value.length; index += 1) {
+    const token = trimString(value[index]);
+    if (token === "--mcp-command") {
+      if (index + 1 < value.length) {
+        out[index + 1] = REDACTED;
+      }
+      continue;
+    }
+    if (token.startsWith("--mcp-command=")) {
+      out[index] = "--mcp-command=" + REDACTED;
+      continue;
+    }
+    if (
+      index + 1 < value.length &&
+      isSensitiveFlagMatch("", token, value[index + 1]) &&
+      typeof value[index + 1] === "string" &&
+      !isSecretReference(value[index + 1])
+    ) {
+      out[index + 1] = REDACTED;
+    }
+  }
+  return out;
+}
+
+function redactCommandString(value, key, secrets) {
+  if (String(key || "") === "mcp_command") {
+    return REDACTED;
+  }
+  const text = redactSensitiveString(value, secrets);
+  return text.replace(
+    /(--mcp-command(?:=|\s+))[\s\S]*$/gi,
+    "$1" + REDACTED,
+  );
+}
+
+function redactSensitiveSubtree(value, depth = 0) {
+  if (depth >= MAX_REDACTION_DEPTH) {
+    return value === null || value === undefined ? value : REDACTED;
+  }
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return isSecretReference(value) ? value : REDACTED;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitiveSubtree(entry, depth + 1));
+  }
+  if (typeof value !== "object") {
+    return REDACTED;
+  }
+  const out = {};
+  for (const [nestedKey, nestedValue] of Object.entries(value)) {
+    const outKey = isLikelySecretPropertyValue(nestedKey) ? REDACTED : nestedKey;
+    out[outKey] = redactSensitiveSubtree(nestedValue, depth + 1);
+  }
+  return out;
+}
+
+function collectSensitiveValues(
+  value,
+  key = "",
+  secrets = newSecretSet(),
+  depth = 0,
+  includeShort = false,
+) {
+  if (depth >= MAX_REDACTION_DEPTH) {
+    secrets.overflow = true;
+    return secrets;
+  }
+  if (isCommandFieldName(key)) {
+    collectCommandValues(value, key, secrets, depth, includeShort);
+    return secrets;
+  }
+  if (isSensitiveFieldName(key) && !isNonSecretConfigurationName(key, value)) {
+    if (
+      typeof value === "string" &&
+      isSafeSecretLocator(key, value)
+    ) {
+      return secrets;
+    }
+    collectStringLeaves(value, secrets, depth, includeShort, true);
+    return secrets;
+  }
+  if (typeof value === "string") {
+    collectSensitiveStringValues(value, secrets, includeShort);
+    return secrets;
+  }
+  if (Array.isArray(value)) {
+    if (isSensitiveEntryTuple(value, key)) {
+      collectSensitiveEntryTuple(value, secrets, depth, includeShort);
+      return secrets;
+    }
+    for (const entry of value) {
+      collectSensitiveValues(entry, key, secrets, depth + 1, includeShort);
+    }
+    return secrets;
+  }
+  if (!value || typeof value !== "object") {
+    return secrets;
+  }
+
+  const commandTarget = value.target_kind === "command";
+  const sensitiveNameValue = sensitiveSiblingName(value);
+  for (const [nestedKey, nestedValue] of Object.entries(value)) {
+    if (
+      isSensitiveFieldName(key) ||
+      (isLikelySecretPropertyValue(nestedKey) && !isSensitiveFieldName(nestedKey))
+    ) {
+      addSensitiveValue(secrets, nestedKey, includeShort);
+    }
+    if (commandTarget && nestedKey === "target_value") {
+      collectStringLeaves(nestedValue, secrets, depth + 1, true);
+      continue;
+    }
+    if (sensitiveNameValue && nestedKey === "value") {
+      if (
+        typeof nestedValue !== "string" ||
+        !isSafeSecretLocator(sensitiveNameValue, nestedValue)
+      ) {
+        collectStringLeaves(nestedValue, secrets, depth + 1, true);
+      }
+      continue;
+    }
+    collectSensitiveValues(nestedValue, nestedKey, secrets, depth + 1, includeShort);
+  }
+  return secrets;
+}
+
+function collectCommandValues(value, key, secrets, depth = 0, includeShort = false) {
+  if (depth >= MAX_REDACTION_DEPTH) {
+    secrets.overflow = true;
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const entry = value[index];
+      collectSensitiveValues(entry, "", secrets, depth + 1, includeShort);
+      const token = trimString(entry);
+      if (token === "--mcp-command" && typeof value[index + 1] === "string") {
+        addSensitiveValue(secrets, value[index + 1], true);
+        continue;
+      }
+      if (token.startsWith("--mcp-command=")) {
+        addSensitiveValue(secrets, token.slice("--mcp-command=".length), true);
+        continue;
+      }
+      if (
+        index + 1 < value.length &&
+        typeof value[index + 1] === "string" &&
+        isSensitiveFlagMatch("", token, value[index + 1]) &&
+        !isSecretReference(value[index + 1])
+      ) {
+        addSensitiveValue(secrets, value[index + 1], includeShort);
+      }
+    }
+    return;
+  }
+  if (typeof value === "string") {
+    if (String(key || "") === "mcp_command") {
+      addSensitiveValue(secrets, value, true);
+      return;
+    }
+    collectSensitiveStringValues(value, secrets, includeShort);
+    for (const match of value.matchAll(/--mcp-command(?:=|\s+)([\s\S]*)$/gi)) {
+      addSensitiveValue(secrets, match[1], true);
+    }
+    return;
+  }
+  if (value !== null && value !== undefined) {
+    collectStringLeaves(value, secrets, depth + 1, includeShort);
+  }
+}
+
+function collectStringLeaves(value, secrets, depth = 0, includeShort = false, includeKeys = false) {
+  if (depth >= MAX_REDACTION_DEPTH) {
+    secrets.overflow = true;
+    return;
+  }
+  if (typeof value === "string") {
+    addSensitiveValue(secrets, value, includeShort);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectStringLeaves(entry, secrets, depth + 1, includeShort, includeKeys);
+    }
+    return;
+  }
+  if (value === null || value === undefined) {
+    return;
+  }
+  if (typeof value !== "object") {
+    addSensitiveValue(secrets, value, includeShort);
+    return;
+  }
+  for (const [nestedKey, nestedValue] of Object.entries(value)) {
+    if (includeKeys && isLikelySecretPropertyValue(nestedKey)) {
+      addSensitiveValue(secrets, nestedKey, includeShort);
+    }
+    collectStringLeaves(nestedValue, secrets, depth + 1, includeShort, includeKeys);
+  }
+}
+
+function unescapeJSONQuotes(value) {
+  return String(value || "").replace(/\\+"/g, '"');
+}
+
+function newSecretSet() {
+  const secrets = new Set();
+  secrets.overflow = false;
+  secrets.totalChars = 0;
+  return secrets;
+}
+
+function copySecretSet(values) {
+  const secrets = newSecretSet();
+  if (!values) {
+    return secrets;
+  }
+  for (const value of values) {
+    addSensitiveValue(secrets, value, true);
+  }
+  secrets.overflow = Boolean(secrets.overflow || values.overflow);
+  return secrets;
+}
+
+function hasUnparseableSensitiveJSONContainer(value) {
+  const text = String(value || "");
+  if (text.length > MAX_EMBEDDED_JSON_CANDIDATE_CHARS) {
+    for (const match of text.matchAll(/"([A-Za-z0-9_.-]+)"\s*:\s*[\[{]/gi)) {
+      if (isSensitiveName(match[1])) {
+        return true;
+      }
+    }
+    return false;
+  }
+  const pattern = /("([A-Za-z0-9_.-]+)"\s*:\s*)([\[{])/gi;
+  let scannedContainers = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (!isSensitiveName(match[2])) {
+      continue;
+    }
+    const containerStart = match.index + match[1].length;
+    scannedContainers += 1;
+    if (scannedContainers > MAX_EMBEDDED_JSON_CANDIDATES) {
+      return true;
+    }
+    if (!isParseableJSONContainerAt(text, containerStart)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isParseableJSONContainerAt(text, start) {
+  const first = text[start];
+  if (first !== "{" && first !== "[") {
+    return false;
+  }
+  const stack = [first];
+  let quoted = false;
+  let escaped = false;
+  for (let index = start + 1; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        quoted = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      if (stack.length >= MAX_REDACTION_DEPTH) {
+        return false;
+      }
+      stack.push(char);
+      continue;
+    }
+    if (char !== "}" && char !== "]") {
+      continue;
+    }
+    const expected = char === "}" ? "{" : "[";
+    if (stack.pop() !== expected) {
+      return false;
+    }
+    if (!stack.length) {
+      try {
+        JSON.parse(text.slice(start, index + 1));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+function forEachEmbeddedJSON(value, visitor) {
+  const text = String(value || "");
+  let start = -1;
+  let stack = [];
+  let nestedCandidates = [];
+  let nestedCandidateChars = 0;
+  let overflow = false;
+  let quoted = false;
+  let escaped = false;
+
+  const visit = (candidateStart, candidateEnd) => {
+    try {
+      visitor(JSON.parse(text.slice(candidateStart, candidateEnd)), candidateStart, candidateEnd);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const visitNestedCandidates = () => {
+    const selected = [];
+    for (const candidate of nestedCandidates.sort(
+      (left, right) => left.start - right.start || right.end - left.end,
+    )) {
+      if (
+        selected.some(
+          (range) => candidate.start >= range.start && candidate.end <= range.end,
+        )
+      ) {
+        continue;
+      }
+      if (visit(candidate.start, candidate.end)) {
+        selected.push(candidate);
+      }
+    }
+  };
+  const reset = () => {
+    start = -1;
+    stack = [];
+    nestedCandidates = [];
+    nestedCandidateChars = 0;
+    quoted = false;
+    escaped = false;
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (start === -1) {
+      if (char === "{" || char === "[") {
+        start = index;
+        stack = [{ char, index }];
+      }
+      continue;
+    }
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        quoted = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      if (stack.length >= MAX_REDACTION_DEPTH) {
+        overflow = true;
+        reset();
+        continue;
+      }
+      stack.push({ char, index });
+      continue;
+    }
+    if (char !== "}" && char !== "]") {
+      continue;
+    }
+    const expected = char === "}" ? "{" : "[";
+    const opener = stack.pop();
+    if (!opener || opener.char !== expected) {
+      visitNestedCandidates();
+      reset();
+      continue;
+    }
+    if (stack.length) {
+      const candidateChars = index + 1 - opener.index;
+      if (
+        nestedCandidates.length >= MAX_EMBEDDED_JSON_CANDIDATES ||
+        nestedCandidateChars + candidateChars > MAX_EMBEDDED_JSON_CANDIDATE_CHARS
+      ) {
+        overflow = true;
+      } else {
+        nestedCandidates.push({ start: opener.index, end: index + 1 });
+        nestedCandidateChars += candidateChars;
+      }
+      continue;
+    }
+    if (!visit(start, index + 1)) {
+      visitNestedCandidates();
+    }
+    reset();
+  }
+  if (start !== -1) {
+    visitNestedCandidates();
+  }
+  return overflow;
+}
+
+function redactEmbeddedJSON(value, knownSecrets = newSecretSet()) {
+  const text = String(value || "");
+  let cursor = 0;
+  let out = "";
+  const overflow = forEachEmbeddedJSON(text, (parsed, start, end) => {
+    const secrets = copySecretSet(knownSecrets);
+    collectSensitiveValues(parsed, "", secrets);
+    const sanitized = redactSensitiveValue(parsed, "", secrets);
+    if (JSON.stringify(parsed) !== JSON.stringify(sanitized)) {
+      out += text.slice(cursor, start) + JSON.stringify(sanitized);
+      cursor = end;
+    }
+  });
+  if (overflow) {
+    return REDACTED;
+  }
+  return cursor ? out + text.slice(cursor) : text;
+}
+
+function redactYAMLBlocks(value) {
+  return String(value || "").replace(
+    new RegExp(YAML_BLOCK_PATTERN, "gmi"),
+    (match, lead, indent, quote, key, body) =>
+      isSensitiveName(key) && !isNonSecretConfigurationName(key, body.trim())
+        ? lead + indent + quote + key + quote + ": " + REDACTED + "\n"
+        : match,
+  );
+}
+
+function redactSensitiveYAMLScalars(value) {
+  const text = String(value || "");
+  if (hasSensitiveYAMLMappingParent(text) || hasSensitiveYAMLFlowMapping(text)) {
+    return REDACTED;
+  }
+  return text.replace(
+    new RegExp(SENSITIVE_YAML_SCALAR_PATTERN, "gmi"),
+    (match, lead, quote, key, quotedDouble, quotedSingle, bare) => {
+      const secret = quotedDouble ?? quotedSingle ?? bare;
+      if (isYAMLBlockIndicator(secret)) {
+        return match;
+      }
+      if (!isSensitiveJSONMatch("", key, secret)) {
+        return match;
+      }
+      return redactSensitiveMatch(
+        match,
+        lead + quote + key + quote + ": ",
+        key,
+        quotedDouble,
+        quotedSingle,
+        bare,
+      );
+    },
+  );
+}
+
+function collectSensitiveStringValues(value, secrets, includeShort = false) {
+  let text = String(value || "");
+  for (let pass = 0; pass <= MAX_ESCAPED_JSON_PASSES; pass += 1) {
+    collectSensitiveStringValuesPass(text, secrets, includeShort);
+    const unescapedJSON = unescapeJSONQuotes(text);
+    if (unescapedJSON === text) {
+      break;
+    }
+    text = unescapedJSON;
+  }
+}
+
+function collectSensitiveStringValuesPass(text, secrets, includeShort) {
+  if (hasUnparseableSensitiveJSONContainer(text)) {
+    secrets.overflow = true;
+    return;
+  }
+  if (hasSensitiveYAMLMappingParent(text)) {
+    collectSensitiveYAMLMappingValues(text, secrets, includeShort);
+  }
+  collectSensitiveYAMLFlowValues(text, secrets, includeShort);
+  collectEmbeddedJSONValues(text, secrets, includeShort);
+  collectYAMLBlockValues(text, secrets, includeShort);
+  for (const match of text.matchAll(new RegExp(OPENAI_STYLE_SECRET_PATTERN, "g"))) {
+    addSensitiveValue(secrets, match[0], includeShort);
+  }
+  for (const match of text.matchAll(new RegExp(PRIVATE_KEY_PEM_PATTERN, "gi"))) {
+    addSensitiveValue(secrets, match[0], true);
+  }
+  for (const match of text.matchAll(new RegExp(BEARER_SECRET_PATTERN, "gi"))) {
+    addSensitiveValue(secrets, match[2], includeShort);
+  }
+  collectSensitivePatternValues(text, SENSITIVE_ASSIGNMENT_PATTERN, secrets, includeShort, isSensitiveAssignmentMatch);
+  collectSensitivePatternValues(text, SENSITIVE_FLAG_PATTERN, secrets, includeShort, isSensitiveFlagMatch);
+  collectSensitivePatternValues(text, SENSITIVE_JSON_PATTERN, secrets, includeShort, isSensitiveJSONMatch);
+  collectSensitiveYAMLScalarValues(text, secrets, includeShort);
+  collectSensitiveHeaderValues(text, secrets, includeShort);
+  for (const match of text.matchAll(new RegExp(URL_USERINFO_PATTERN, "gi"))) {
+    addSensitiveValue(secrets, match[2], includeShort, true);
+  }
+}
+
+function collectEmbeddedJSONValues(value, secrets, includeShort = false) {
+  if (
+    forEachEmbeddedJSON(
+      value,
+      (parsed) => collectSensitiveValues(parsed, "", secrets, 0, includeShort),
+    )
+  ) {
+    secrets.overflow = true;
+  }
+}
+
+function collectYAMLBlockValues(value, secrets, includeShort) {
+  for (const match of String(value || "").matchAll(
+    new RegExp(YAML_BLOCK_PATTERN, "gmi"),
+  )) {
+    if (!isSensitiveName(match[4]) || isNonSecretConfigurationName(match[4], match[5].trim())) {
+      continue;
+    }
+    const body = match[5].trim();
+    addSensitiveValue(secrets, body, includeShort);
+    for (const line of body.split(/\r?\n/)) {
+      addSensitiveValue(secrets, line.trim(), includeShort);
+    }
+  }
+}
+
+function addSensitiveValue(secrets, value, includeShort = false, allowReference = false) {
+  const text = String(value || "");
+  if (
+    text === "" ||
+    (!includeShort && text.length <= 4) ||
+    (!allowReference && isSecretReferenceOrBearerReference(text)) ||
+    text === REDACTED ||
+    secrets.has(text)
+  ) {
+    return;
+  }
+  const nextChars = (secrets.totalChars || 0) + text.length;
+  if (secrets.size >= MAX_KNOWN_SECRETS || nextChars > MAX_KNOWN_SECRET_CHARS) {
+    secrets.overflow = true;
+    return;
+  }
+  secrets.add(text);
+  secrets.totalChars = nextChars;
+}
+
+function redactSensitiveMatch(match, prefix, _key, quotedDouble, quotedSingle, bare) {
+  const secret = quotedDouble ?? quotedSingle ?? bare;
+  if (isSecretReferenceOrBearerReference(secret)) {
+    return match;
+  }
+  if (quotedDouble !== undefined) {
+    return prefix + '"' + REDACTED + '"';
+  }
+  if (quotedSingle !== undefined) {
+    return prefix + "'" + REDACTED + "'";
+  }
+  return prefix + REDACTED;
+}
+
+function redactSensitiveAssignmentMatch(match, prefix, key, quotedDouble, quotedSingle, bare) {
+  const secret = quotedDouble ?? quotedSingle ?? bare;
+  if (!isSensitiveAssignmentMatch(prefix, key, secret)) {
+    return match;
+  }
+  return redactSensitiveMatch(match, prefix, key, quotedDouble, quotedSingle, bare);
+}
+
+function redactSensitiveFlagMatch(match, prefix, key, quotedDouble, quotedSingle, bare) {
+  const secret = quotedDouble ?? quotedSingle ?? bare;
+  if (!isSensitiveFlagMatch(prefix, key, secret)) {
+    return match;
+  }
+  return redactSensitiveMatch(match, prefix, key, quotedDouble, quotedSingle, bare);
+}
+
+function redactSensitiveJSONMatch(match, prefix, key, quotedDouble, quotedSingle, bare) {
+  const secret = quotedDouble ?? quotedSingle ?? bare;
+  if (!isSensitiveJSONMatch(prefix, key, secret)) {
+    return match;
+  }
+  return redactSensitiveMatch(match, prefix, key, quotedDouble, quotedSingle, bare);
+}
+
+function collectSensitiveYAMLScalarValues(text, secrets, includeShort) {
+  for (const match of text.matchAll(new RegExp(SENSITIVE_YAML_SCALAR_PATTERN, "gmi"))) {
+    const secret = decodeYAMLScalarCapture(match[4], match[5], match[6]);
+    if (isYAMLBlockIndicator(secret)) {
+      continue;
+    }
+    if (isSensitiveJSONMatch("", match[3], secret)) {
+      addSensitiveValue(secrets, secret, includeShort);
+    }
+  }
+}
+
+function isYAMLBlockIndicator(value) {
+  return /^(?:[|>](?:[1-9][-+]?|[-+][1-9]?)?)$/.test(String(value || ""));
+}
+
+function hasSensitiveYAMLMappingParent(value) {
+  const lines = String(value || "").split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    if (sensitiveYAMLMappingEnd(lines, index) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasSensitiveYAMLFlowMapping(value) {
+  let found = false;
+  forEachSensitiveYAMLFlowMapping(value, () => {
+    found = true;
+  });
+  return found;
+}
+
+function collectSensitiveYAMLFlowValues(value, secrets, includeShort) {
+  forEachSensitiveYAMLFlowMapping(value, (body, complete, opener) => {
+    if (!complete) {
+      secrets.overflow = true;
+      return;
+    }
+    if (opener === "[") {
+      collectYAMLFlowSequenceValues("[" + body + "]", secrets, includeShort);
+    } else {
+      collectYAMLFlowScalarValues(body, secrets, includeShort);
+    }
+  });
+}
+
+function forEachSensitiveYAMLFlowMapping(value, visit) {
+  const text = String(value || "");
+  const embeddedJSONRanges = [];
+  forEachEmbeddedJSON(text, (_parsed, start, end) => {
+    embeddedJSONRanges.push([start, end]);
+  });
+  const pattern =
+    /(?:^|[^A-Za-z0-9_])(?:(["'])([^"'\r\n]+)\1|([A-Za-z0-9_][A-Za-z0-9_.-]*))\s*:\s*(?:(?:&[A-Za-z0-9_.-]+|![A-Za-z0-9_.!:/-]+)\s+)*([{\[])/g;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const key = match[2] ?? match[3];
+    if (!isSensitiveName(key) || isNonSecretConfigurationName(key)) {
+      continue;
+    }
+    const opener = match[4];
+    const containerStart = pattern.lastIndex - 1;
+    const containerEnd = matchingYAMLFlowContainerEnd(text, containerStart);
+    if (containerEnd === -1) {
+      if (
+        embeddedJSONRanges.some(
+          ([start, end]) => containerStart >= start && containerStart < end,
+        )
+      ) {
+        continue;
+      }
+      visit(text.slice(containerStart + 1), false, opener);
+      return;
+    }
+    if (
+      embeddedJSONRanges.some(
+        ([start, end]) => containerStart >= start && containerEnd < end,
+      )
+    ) {
+      pattern.lastIndex = containerEnd + 1;
+      continue;
+    }
+    visit(text.slice(containerStart + 1, containerEnd), true, opener);
+    pattern.lastIndex = containerEnd + 1;
+  }
+}
+
+function matchingYAMLFlowContainerEnd(value, containerStart) {
+  const text = String(value || "");
+  const stack = [];
+  let quote = "";
+  let escaped = false;
+  for (let index = containerStart; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (char === quote && text[index + 1] === quote) {
+        index += 1;
+      } else if (char === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      stack.push(char);
+      continue;
+    }
+    if (char !== "}" && char !== "]") {
+      continue;
+    }
+    const opener = stack.pop();
+    if (
+      !opener ||
+      (char === "}" && opener !== "{") ||
+      (char === "]" && opener !== "[")
+    ) {
+      return -1;
+    }
+    if (stack.length === 0) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function collectYAMLFlowScalarValues(value, secrets, includeShort) {
+  const text = String(value || "");
+  const pattern = /:\s*(?:"((?:\\.|[^"\\])*)"|'((?:''|\\.|[^'\\])*)'|([^,\s}\]]+))/g;
+  for (const match of text.matchAll(pattern)) {
+    const raw = decodeYAMLScalarCapture(match[1], match[2], match[3]);
+    if (!raw || isYAMLBlockIndicator(raw)) {
+      continue;
+    }
+    if (/^[{[]/.test(raw)) {
+      collectYAMLFlowScalarValues(raw, secrets, includeShort);
+      collectYAMLFlowSequenceValues(raw, secrets, includeShort);
+      continue;
+    }
+    addSensitiveValue(secrets, raw, includeShort);
+  }
+  collectYAMLFlowSequenceValues(text, secrets, includeShort);
+}
+
+function collectYAMLFlowSequenceValues(value, secrets, includeShort) {
+  const text = String(value || "");
+  const itemPattern =
+    /"((?:\\.|[^"\\])*)"|'((?:''|\\.|[^'\\])*)'|([^\s,\[\]{}:]+)/g;
+  for (const item of text.matchAll(itemPattern)) {
+    const end = item.index + item[0].length;
+    const next = text.slice(end).match(/^\s*(.)/);
+    if (next && next[1] === ":") {
+      continue;
+    }
+    const raw = decodeYAMLScalarCapture(item[1], item[2], item[3]);
+    if (!raw || isYAMLBlockIndicator(raw)) {
+      continue;
+    }
+    addSensitiveValue(secrets, raw, includeShort);
+  }
+}
+
+function collectSensitiveYAMLMappingValues(value, secrets, includeShort) {
+  const lines = String(value || "").split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const end = sensitiveYAMLMappingEnd(lines, index);
+    if (end === -1) {
+      continue;
+    }
+    for (let childIndex = index + 1; childIndex < end; childIndex += 1) {
+      const trimmed = lines[childIndex].trim();
+      if (!trimmed) {
+        continue;
+      }
+      const scalar = trimmed.match(
+        /^(?:(?:["'][^"'\r\n]+["']|[A-Za-z0-9_][A-Za-z0-9_.-]*)\s*:\s*)?(.+)$/,
+      );
+      if (!scalar) {
+        continue;
+      }
+      const raw = stripYAMLInlineComment(
+        scalar[1].trim().replace(/^-\s+/, ""),
+      );
+      if (!raw || isYAMLBlockIndicator(raw)) {
+        continue;
+      }
+      if (/^[{[]/.test(raw)) {
+        collectYAMLFlowScalarValues(raw, secrets, includeShort);
+      }
+      addSensitiveValue(secrets, decodeYAMLScalar(raw), includeShort);
+    }
+    index = end - 1;
+  }
+}
+
+function decodeYAMLScalarCapture(quotedDouble, quotedSingle, bare) {
+  if (quotedDouble !== undefined) {
+    return decodeYAMLScalar('"' + quotedDouble + '"');
+  }
+  if (quotedSingle !== undefined) {
+    return decodeYAMLScalar("'" + quotedSingle + "'");
+  }
+  return stripYAMLInlineComment(String(bare || "").trim());
+}
+
+function decodeYAMLScalar(value) {
+  const text = stripYAMLInlineComment(String(value || "").trim());
+  if (text.length >= 2 && text.startsWith("'") && text.endsWith("'")) {
+    return text.slice(1, -1).replace(/''/g, "'");
+  }
+  if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
+    return decodeYAMLDoubleQuotedScalar(text.slice(1, -1));
+  }
+  return text;
+}
+
+function decodeYAMLDoubleQuotedScalar(value) {
+  const text = String(value || "");
+  const simpleEscapes = {
+    "0": "\0",
+    a: "\x07",
+    b: "\b",
+    t: "\t",
+    n: "\n",
+    v: "\v",
+    f: "\f",
+    r: "\r",
+    e: "\x1b",
+    " ": " ",
+    '"': '"',
+    "/": "/",
+    "\\": "\\",
+    N: "\x85",
+    _: "\xa0",
+    L: "\u2028",
+    P: "\u2029",
+  };
+  let out = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char !== "\\" || index + 1 >= text.length) {
+      out += char;
+      continue;
+    }
+    const next = text[index + 1];
+    if (Object.prototype.hasOwnProperty.call(simpleEscapes, next)) {
+      out += simpleEscapes[next];
+      index += 1;
+      continue;
+    }
+    const width = next === "x" ? 2 : next === "u" ? 4 : next === "U" ? 8 : 0;
+    const hex = text.slice(index + 2, index + 2 + width);
+    if (width && hex.length === width && /^[0-9A-Fa-f]+$/.test(hex)) {
+      const codePoint = Number.parseInt(hex, 16);
+      if (codePoint <= 0x10ffff) {
+        out += String.fromCodePoint(codePoint);
+        index += width + 1;
+        continue;
+      }
+    }
+    out += "\\" + next;
+    index += 1;
+  }
+  return out;
+}
+
+function sensitiveYAMLMappingEnd(lines, index) {
+  const parent = sensitiveYAMLMappingParent(lines[index]);
+  if (!parent) {
+    return -1;
+  }
+  const parentIndent = lines[index].match(/^[ \t]*/)[0].length;
+  let end = index + 1;
+  let hasChild = false;
+  for (; end < lines.length; end += 1) {
+    const child = lines[end];
+    if (!child.trim()) {
+      continue;
+    }
+    const childIndent = child.match(/^[ \t]*/)[0].length;
+    if (childIndent <= parentIndent) {
+      break;
+    }
+    hasChild = true;
+  }
+  return hasChild ? end : -1;
+}
+
+function sensitiveYAMLMappingParent(value) {
+  const text = String(value || "");
+  const pattern =
+    /(?:(["'])([^"'\r\n]+)\1|([A-Za-z0-9_][A-Za-z0-9_.-]*))\s*:\s*/g;
+  let candidate = null;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > 0 && /[A-Za-z0-9_]/.test(text[match.index - 1])) {
+      continue;
+    }
+    const key = match[2] ?? match[3];
+    if (!isSensitiveName(key) || isNonSecretConfigurationName(key)) {
+      continue;
+    }
+    const parentValue = stripYAMLInlineComment(
+      text.slice(match.index + match[0].length).trim(),
+    );
+    if (
+      parentValue &&
+      !/^(?:(?:&[A-Za-z0-9_.-]+|![A-Za-z0-9_.!:/-]+)\s*)+$/.test(parentValue)
+    ) {
+      continue;
+    }
+    candidate = key;
+  }
+  return candidate;
+}
+
+function stripYAMLInlineComment(value) {
+  const text = String(value || "");
+  let quote = "";
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (char === quote && text[index + 1] === quote) {
+        index += 1;
+      } else if (char === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === "#" && (index === 0 || /\s/.test(text[index - 1]))) {
+      return text.slice(0, index).trimEnd();
+    }
+  }
+  return text;
+}
+
+function redactSensitiveHeaderMatch(match, prefix, key, quotedDouble, quotedSingle, bare) {
+  const secret = quotedDouble ?? quotedSingle ?? bare;
+  if (!isSensitiveHeaderMatch(prefix, key, secret)) {
+    return match;
+  }
+  return redactSensitiveMatch(match, prefix, key, quotedDouble, quotedSingle, bare);
+}
+
+function redactSensitiveHeaders(value) {
+  const text = String(value || "");
+  const pattern = new RegExp(SENSITIVE_HEADER_PATTERN, "gi");
+  let cursor = 0;
+  let out = "";
+  let changed = false;
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const secret = secretValueFromMatch(match);
+    if (!isSensitiveHeaderMatch(match[1], match[2], secret)) {
+      pattern.lastIndex = match.index + 1;
+      continue;
+    }
+    out +=
+      text.slice(cursor, match.index) +
+      redactSensitiveHeaderMatch(...match);
+    cursor = pattern.lastIndex;
+    changed = true;
+  }
+  return changed ? out + text.slice(cursor) : text;
+}
+
+function collectSensitivePatternValues(text, pattern, secrets, includeShort, predicate) {
+  for (const match of text.matchAll(new RegExp(pattern, "gi"))) {
+    const secret = secretValueFromMatch(match);
+    if (predicate(match[1], match[2], secret)) {
+      addSensitiveValue(secrets, secret, includeShort);
+    }
+  }
+}
+
+function collectSensitiveHeaderValues(text, secrets, includeShort) {
+  const pattern = new RegExp(SENSITIVE_HEADER_PATTERN, "gi");
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    const secret = secretValueFromMatch(match);
+    if (!isSensitiveHeaderMatch(match[1], match[2], secret)) {
+      pattern.lastIndex = match.index + 1;
+      continue;
+    }
+    addSensitiveValue(secrets, secret, includeShort);
+  }
+}
+
+function isSensitiveAssignmentMatch(_prefix, key, value) {
+  return (
+    String(value || "") !== "" &&
+    isSensitiveName(key) &&
+    !isNonSecretConfigurationName(key, value) &&
+    !isSafeSecretLocator(key, value)
+  );
+}
+
+function isSensitiveFlagMatch(_prefix, key, value) {
+  return (
+    String(value || "") !== "" &&
+    isSensitiveName(key) &&
+    !isNonSecretConfigurationName(key, value) &&
+    !isSafeSecretLocator(key, value)
+  );
+}
+
+function isSensitiveJSONMatch(_prefix, key, value) {
+  return (
+    String(value || "") !== "" &&
+    isSensitiveName(key) &&
+    !isNonSecretConfigurationName(key, value) &&
+    !isSafeSecretLocator(key, value)
+  );
+}
+
+function isSensitiveHeaderMatch(_prefix, key, value) {
+  return (
+    String(value || "") !== "" &&
+    !isYAMLBlockIndicator(value) &&
+    isSensitiveName(key) &&
+    !isNonSecretConfigurationName(key, value) &&
+    !isSafeSecretLocator(key, value)
+  );
+}
+
+function isEntryTupleContainerName(value) {
+  const segments = nameSegments(value);
+  const last = segments[segments.length - 1];
+  return ["header", "headers", "environment", "environments", "env"].includes(last);
+}
+
+function isSensitiveEntryTuple(value, key) {
+  return (
+    isEntryTupleContainerName(key) &&
+    Array.isArray(value) &&
+    value.length >= 2 &&
+    typeof value[0] === "string" &&
+    isSensitiveName(value[0]) &&
+    !isNonSecretConfigurationName(value[0], value[1])
+  );
+}
+
+function collectSensitiveEntryTuple(value, secrets, depth = 0, includeShort = false) {
+  const name = value[0];
+  const entryValue = value[1];
+  if (!(typeof entryValue === "string" && isSafeSecretLocator(name, entryValue))) {
+    collectStringLeaves(entryValue, secrets, depth + 1, true);
+  }
+  for (let index = 2; index < value.length; index += 1) {
+    collectSensitiveValues(value[index], "", secrets, depth + 1, includeShort);
+  }
+}
+
+function redactSensitiveEntryTuple(value, secrets, depth = 0) {
+  const out = value.map((entry) => redactSensitiveValue(entry, "", secrets, depth + 1));
+  const name = value[0];
+  const entryValue = value[1];
+  if (!(typeof entryValue === "string" && isSafeSecretLocator(name, entryValue))) {
+    out[1] = entryValue === null || entryValue === undefined ? entryValue : REDACTED;
+  }
+  return out;
+}
+
+function isNonSecretConfigurationName(value, configuredValue) {
+  const segments = nameSegments(value);
+  const last = segments[segments.length - 1];
+  const text =
+    configuredValue === null || configuredValue === undefined
+      ? ""
+      : String(configuredValue).trim();
+  if (last === "url" || last === "uri") {
+    return isSafeConfigurationURL(text);
+  }
+  if (last === "domain") {
+    return /^\.?[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(text);
+  }
+  if (last === "length" || last === "min" || last === "max") {
+    return /^\d+$/.test(text);
+  }
+  if (last === "policy") {
+    return /^(?:required|optional|strict|lenient|default|none|allow|deny|prompt|auto)$/i.test(text);
+  }
+  if (last === "enabled") {
+    return /^(?:true|false|0|1)$/i.test(text);
+  }
+  if (last === "header") {
+    return /^(?:Authorization|Proxy-Authorization|X-Api-Key|Api-Key|X-Auth-Token|X-Access-Token)$/i.test(text);
+  }
+  if (last === "algorithm") {
+    return /^(?:argon2(?:id|i|d)?|bcrypt|scrypt|pbkdf2|sha-?[0-9]+|hmac-[a-z0-9-]+|hs[0-9]+|rs[0-9]+|es[0-9]+)$/i.test(text);
+  }
+  return false;
+}
+
+function isSafeConfigurationURL(value) {
+  const text = trimString(value);
+  if (!text || /\s/.test(text) || new RegExp(OPENAI_STYLE_SECRET_PATTERN).test(text)) {
+    return false;
+  }
+  try {
+    const parsed = new URL(text);
+    if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) {
+      return false;
+    }
+    for (const [key, entryValue] of parsed.searchParams.entries()) {
+      if (
+        isSensitiveName(key) &&
+        !isNonSecretConfigurationName(key, entryValue) &&
+        !isSecretReferenceOrBearerReference(entryValue)
+      ) {
+        return false;
+      }
+    }
+    if (hasInlineSensitiveURLFragment(parsed.hash)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasInlineSensitiveURLFragment(value) {
+  const fragment = decodeURLComponent(String(value || "").replace(/^#/, ""));
+  for (const component of fragment.split(/[&#?]/)) {
+    const separator = component.search(/[=:]/);
+    if (separator <= 0) {
+      continue;
+    }
+    const key = decodeURLComponent(component.slice(0, separator).trim());
+    const entryValue = decodeURLComponent(component.slice(separator + 1).trim());
+    if (
+      entryValue &&
+      isSensitiveName(key) &&
+      !isNonSecretConfigurationName(key, entryValue) &&
+      !isSecretReferenceOrBearerReference(entryValue)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function decodeURLComponent(value) {
+  try {
+    return decodeURIComponent(String(value || ""));
+  } catch {
+    return String(value || "");
+  }
+}
+
+function isCredentialFileAssignment(key, value) {
+  const name = String(key || "").toUpperCase();
+  if (
+    name !== "GOOGLE_APPLICATION_CREDENTIALS" &&
+    !/(?:CREDENTIALS|SECRET|KEY)_FILE$/.test(name)
+  ) {
+    return false;
+  }
+  return isPathShapedValue(value);
+}
+
+function isPathLocatorName(value, pathValue) {
+  const segments = nameSegments(value);
+  const last = segments[segments.length - 1];
+  if (!["file", "path", "env", "name"].includes(last)) {
+    return false;
+  }
+  if (pathValue === undefined) {
+    return true;
+  }
+  const text = trimString(pathValue);
+  if (last === "env" || last === "name") {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(text);
+  }
+  return text === "" || isPathShapedValue(text);
+}
+
+function isPathShapedValue(value) {
+  const text = trimString(value);
+  return (
+    /^(?:[/.~]|[A-Za-z]:[\\/])/.test(text) ||
+    /[\\/]/.test(text) ||
+    /^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9]{1,16}$/.test(text)
+  );
+}
+
+function isPrivateKeyPathLocator(key, value) {
+  const segments = nameSegments(key);
+  return (
+    segments.length >= 2 &&
+    segments[segments.length - 2] === "private" &&
+    segments[segments.length - 1] === "key" &&
+    isPathShapedValue(value)
+  );
+}
+
+function isSafeSecretLocator(key, value) {
+  return (
+    isPathLocatorName(key, value) ||
+    isCredentialFileAssignment(key, value) ||
+    isPrivateKeyPathLocator(key, value)
+  );
+}
+
+function nameSegments(value) {
+  return String(value || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/\[/g, "_")
+    .replace(/\]/g, "")
+    .replace(/^-+/, "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function isSensitiveName(value) {
+  const segments = nameSegments(value);
+  if (!segments.length) {
+    return false;
+  }
+  const joined = segments.join("");
+  if (
+    /(?:apikey|adminkey|runtimetoken|accesstoken|refreshtoken|idtoken|clientsecret|authtoken|privatekey|setcookie)/.test(joined)
+  ) {
+    return true;
+  }
+  if (segments.some((segment) => /^(?:password|pass|passwd|passphrase|authorization|cookie)$/.test(segment))) {
+    return true;
+  }
+  if (segments.includes("credentials") || segments.includes("credential")) {
+    return true;
+  }
+  if (segments.includes("token")) {
+    return (
+      segments.length === 1 ||
+      segments[segments.length - 1] === "token" ||
+      ["file", "path", "env", "name"].includes(segments[segments.length - 1]) ||
+      segments.includes("value") ||
+      segments.includes("secret") ||
+      segments.includes("key")
+    );
+  }
+  if (segments.includes("secret")) {
+    return (
+      segments.length === 1 ||
+      segments[segments.length - 1] === "secret" ||
+      ["file", "path", "env", "name"].includes(segments[segments.length - 1]) ||
+      segments.includes("key") ||
+      segments.includes("value") ||
+      segments.includes("client") ||
+      segments.includes("access")
+    );
+  }
+  return false;
+}
+
+function isSensitiveFieldName(value) {
+  return isSensitiveName(value);
+}
+
+function sensitiveSiblingName(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+  const name = typeof value.name === "string" ? value.name : value.key;
+  return typeof name === "string" &&
+    isSensitiveName(name) &&
+    !isNonSecretConfigurationName(name, value.value)
+    ? name
+    : "";
+}
+
+function isCommandFieldName(value) {
+  return /^(?:command|mcp_command|live_process_command)$/.test(String(value || ""));
+}
+
+function isSensitiveFlagToken(value) {
+  const token = trimString(value);
+  return Boolean(token) && !token.includes("=") && isSensitiveName(token);
+}
+
+function isSecretReference(value) {
+  const text = trimString(value);
+  return (
+    /^env:[A-Za-z_][A-Za-z0-9_]*$/.test(text) ||
+    /^file:.+$/.test(text) ||
+    /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(text) ||
+    /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(text) ||
+    /^%[A-Za-z_][A-Za-z0-9_]*%$/.test(text) ||
+    /^\$env:[A-Za-z_][A-Za-z0-9_]*$/i.test(text)
+  );
+}
+
+function isSecretReferenceOrBearerReference(value) {
+  const text = trimString(value).replace(/^['"]|['"]$/g, "");
+  if (isSecretReference(text)) {
+    return true;
+  }
+  const authorization = text.match(/^(?:Bearer|Basic)\s+(.+)$/i);
+  return Boolean(authorization && isSecretReference(authorization[1]));
+}
+
+function secretValueFromMatch(match) {
+  return match[3] ?? match[4] ?? match[5] ?? "";
+}
+
 function nested(value, keys) {
   let current = value;
   for (const key of keys) {
@@ -907,7 +2423,7 @@ function nested(value, keys) {
 
 async function handleRpc(message) {
   if (message.method === "initialize") {
-    return {
+    return redactRpcResponse({
       jsonrpc: "2.0",
       id: message.id,
       result: {
@@ -915,7 +2431,7 @@ async function handleRpc(message) {
         capabilities: { tools: {} },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
       },
-    };
+    });
   }
 
   if (message.method === "notifications/initialized") {
@@ -933,9 +2449,9 @@ async function handleRpc(message) {
   if (message.method === "tools/call") {
     try {
       const result = await callTool(message.params.name, message.params.arguments || {});
-      return { jsonrpc: "2.0", id: message.id, result };
+      return redactRpcResponse({ jsonrpc: "2.0", id: message.id, result });
     } catch (error) {
-      return {
+      return redactRpcResponse({
         jsonrpc: "2.0",
         id: message.id,
         error: {
@@ -943,15 +2459,61 @@ async function handleRpc(message) {
           message: error && error.message ? error.message : String(error),
           data: error && error.payload ? error.payload : undefined,
         },
-      };
+      }, error && error.redactionSecrets);
     }
   }
 
-  return {
+  return redactRpcResponse({
     jsonrpc: "2.0",
     id: message.id,
     error: { code: -32601, message: `method not found: ${message.method}` },
-  };
+  });
+}
+
+function redactRpcResponse(response, extraSecrets = newSecretSet()) {
+  if (!response || typeof response !== "object") {
+    return response;
+  }
+  const out = { ...response };
+  if ("result" in response) {
+    const secrets = collectSensitiveValues(response.result, "", newSecretSet());
+    out.result = secrets.overflow
+      ? redactResultOnOverflow(response.result)
+      : redactSensitiveValue(response.result, "", secrets);
+  }
+  if (response.error && typeof response.error === "object") {
+    const secrets = copySecretSet(extraSecrets);
+    if (response.error.data !== undefined) {
+      collectSensitiveValues(response.error.data, "", secrets);
+    }
+    out.error = {
+      ...response.error,
+      message: redactSensitiveString(response.error.message, secrets),
+      data:
+        response.error.data === undefined
+          ? undefined
+          : redactSensitiveValue(response.error.data, "", secrets),
+    };
+  }
+  return out;
+}
+
+function redactResultOnOverflow(result) {
+  const out = {};
+  if (result && Array.isArray(result.content)) {
+    out.content = result.content.map((entry) => {
+      if (entry && typeof entry === "object" && entry.type === "text") {
+        return { type: "text", text: REDACTED };
+      }
+      return { type: "text", text: REDACTED };
+    });
+  } else {
+    out.content = [{ type: "text", text: REDACTED }];
+  }
+  if (result && typeof result.isError === "boolean") {
+    out.isError = result.isError;
+  }
+  return out;
 }
 
 async function main() {

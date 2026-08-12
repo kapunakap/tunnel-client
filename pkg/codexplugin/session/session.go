@@ -844,11 +844,5 @@ func ParsePortFromHealthURL(raw string) int {
 }
 
 func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	if !strings.ContainsAny(value, " \t\n'\"\\$`") {
-		return value
-	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }

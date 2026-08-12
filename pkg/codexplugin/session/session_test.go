@@ -55,6 +55,49 @@ func TestTmuxSessionNameIsScopedByStateRoot(t *testing.T) {
 	require.Contains(t, first, "tunnel-mcp__docs-mcp__")
 }
 
+func TestShellQuoteAlwaysSingleQuotesShellTokens(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "plain", value: "tunnel-client", want: "'tunnel-client'"},
+		{name: "semicolon", value: "a;b", want: "'a;b'"},
+		{name: "ampersand", value: "a&b", want: "'a&b'"},
+		{name: "pipe", value: "a|b", want: "'a|b'"},
+		{name: "input redirect", value: "a<b", want: "'a<b'"},
+		{name: "output redirect", value: "a>b", want: "'a>b'"},
+		{name: "dollar", value: "$HOME", want: "'$HOME'"},
+		{name: "backtick", value: "`id`", want: "'`id`'"},
+		{name: "whitespace", value: "two words\tand tab", want: "'two words\tand tab'"},
+		{name: "single quote", value: "O'Reilly", want: "'O'\\''Reilly'"},
+		{name: "empty", value: "", want: "''"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, shellQuote(tt.value))
+		})
+	}
+}
+
+func TestTunnelClientArgsRemainRawArgv(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, []string{
+		"/tmp/tunnel;client&|<>$` with'quote",
+		"run",
+		"--profile-dir",
+		"/tmp/profiles & data",
+		"--profile",
+		"docs|mcp",
+	}, TunnelClientArgs("/tmp/tunnel;client&|<>$` with'quote", "docs|mcp", "/tmp/profiles & data"))
+}
+
 func TestProbeHealthEndpoints(t *testing.T) {
 	t.Parallel()
 
@@ -141,13 +184,72 @@ func TestStartTmuxUsesSourceFileForSecretEnv(t *testing.T) {
 		{"tmux", "list-panes", "-t", "=tunnel-mcp__docs-mcp__deadbeef", "-F", "#{pane_id}"},
 	}, gotRunArgs)
 	require.Equal(t, []string{"tmux", "source-file", "-"}, gotArgs)
-	require.Contains(t, gotStdin, "set-environment -t =tunnel-mcp__docs-mcp__deadbeef OPENAI_TUNNEL_KEY_PROD sk-proj-runtime-secret")
-	require.Contains(t, gotStdin, "respawn-pane -k -t %42")
-	require.Contains(t, gotStdin, "tunnel-client run --profile-dir /tmp/profiles --profile docs-mcp")
-	require.Contains(t, gotStdin, " 2>&1")
+	require.Contains(t, gotStdin, "set-environment -t ='tunnel-mcp__docs-mcp__deadbeef' 'OPENAI_TUNNEL_KEY_PROD' 'sk-proj-runtime-secret'")
+	require.Contains(t, gotStdin, "respawn-pane -k -t '%42'")
+	require.Contains(t, gotStdin, `'\''/tmp/tunnel-client'\'' '\''run'\'' '\''--profile-dir'\'' '\''/tmp/profiles'\'' '\''--profile'\'' '\''docs-mcp'\''`)
+	require.Contains(t, gotStdin, " 2>&1'")
 	require.NotContains(t, strings.Join(gotRunArgs[0], " "), "OPENAI_TUNNEL_KEY_PROD=sk-proj-runtime-secret")
 	require.NotContains(t, strings.Join(gotRunArgs[1], " "), "OPENAI_TUNNEL_KEY_PROD=sk-proj-runtime-secret")
 	require.NotContains(t, strings.Join(gotArgs, " "), "OPENAI_TUNNEL_KEY_PROD=sk-proj-runtime-secret")
+}
+
+func TestStartTmuxQuotesShellCommandAndPreservesRedirection(t *testing.T) {
+	t.Parallel()
+
+	var gotArgs []string
+	rt := Runtime{
+		Run: func(args []string, env map[string]string) (CompletedProcess, error) {
+			gotArgs = append([]string{}, args...)
+			return CompletedProcess{ReturnCode: 0}, nil
+		},
+	}
+	logPath := filepath.Join(t.TempDir(), "runtime.log")
+
+	_, err := StartTmux(
+		rt,
+		"tunnel-mcp__docs-mcp__deadbeef",
+		"/tmp/tunnel;client&|<>$` with'quote",
+		"docs|mcp",
+		"/tmp/profiles & data",
+		nil,
+		logPath,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"tmux",
+		"new-session",
+		"-d",
+		"-s",
+		"tunnel-mcp__docs-mcp__deadbeef",
+		"'/tmp/tunnel;client&|<>$` with'\\''quote' 'run' '--profile-dir' '/tmp/profiles & data' '--profile' 'docs|mcp' >> '" + logPath + "' 2>&1",
+	}, gotArgs)
+}
+
+func TestTmuxLaunchScriptQuotesNestedShellCommand(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sessionName     = "session;name"
+		paneID          = "%42"
+		tunnelClientBin = "/tmp/tunnel;client&|<>$` with'quote"
+		profileName     = "docs|mcp"
+		profileDir      = "/tmp/profiles & data"
+		logPath         = "/tmp/runtime log"
+		envValue        = "secret; &|<>$` with'quote"
+	)
+	wantCommand := "'/tmp/tunnel;client&|<>$` with'\\''quote' 'run' '--profile-dir' '/tmp/profiles & data' '--profile' 'docs|mcp' >> '/tmp/runtime log' 2>&1"
+	wantScript := "set-environment -t ='session;name' 'OPENAI_TUNNEL_KEY_PROD' 'secret; &|<>$` with'\\''quote'\n" +
+		"respawn-pane -k -t '%42' " + shellQuote(wantCommand) + "\n"
+
+	require.Equal(t, wantScript, tmuxLaunchScript(
+		sessionName,
+		paneID,
+		tunnelClientBin,
+		profileName,
+		profileDir,
+		map[string]string{"OPENAI_TUNNEL_KEY_PROD": envValue},
+		logPath,
+	))
 }
 
 func TestStartTmuxPrecreatesPrivateLogFile(t *testing.T) {

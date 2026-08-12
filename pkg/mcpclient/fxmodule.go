@@ -230,7 +230,11 @@ func connectStartupProbe(ctx context.Context, connect func(context.Context) (pro
 			cause:   transportErr,
 		}
 	}
-	return session, NewProbeHTTPStatusError(statusCode, err)
+	// Failed connects never return a usable session. Do not propagate the
+	// interface value: mcp.Client.Connect can return a typed nil
+	// *mcp.ClientSession, which would otherwise look non-nil to late-result
+	// cleanup and panic when Close is called.
+	return nil, NewProbeHTTPStatusError(statusCode, err)
 }
 
 // probeTransportError retains the SDK's user-facing probe message while

@@ -665,6 +665,33 @@ func TestDeliverStartupProbeResultClosesSessionAfterCancellation(t *testing.T) {
 	}
 }
 
+func TestDeliverStartupProbeResultDoesNotCloseTypedNilFailedSession(t *testing.T) {
+	t.Parallel()
+
+	var sdkSession *mcp.ClientSession
+	session, err := connectStartupProbe(
+		context.Background(),
+		func(context.Context) (probeSession, error) {
+			return sdkSession, errors.New("boom")
+		},
+	)
+	if err == nil {
+		t.Fatal("expected failed startup probe")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Before failed connects normalized their session result to nil, the
+	// typed-nil SDK session above reached this late-result cleanup path and
+	// panicked in (*mcp.ClientSession).Close.
+	deliverStartupProbeResult(
+		ctx,
+		make(chan startupProbeResult),
+		startupProbeResult{session: session, err: err},
+	)
+}
+
 func TestRunStartupProbeWithRetryKeepsStatePendingUntilListenerReachable(t *testing.T) {
 	t.Parallel()
 

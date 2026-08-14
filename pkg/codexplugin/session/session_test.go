@@ -44,6 +44,7 @@ func TestWriteRuntimeProfileUsesExistingJSONCompatibleShape(t *testing.T) {
 	require.Contains(t, string(data), `"config_version": 1`)
 	require.Contains(t, string(data), `"url_path": "/chatgpttunnelgateway/dev/us"`)
 	require.Contains(t, string(data), `"server_urls": [`)
+	require.Contains(t, string(data), `"file": "`+LogPath("docs-mcp", root)+`"`)
 }
 
 func TestTmuxSessionNameIsScopedByStateRoot(t *testing.T) {
@@ -85,17 +86,61 @@ func TestShellQuoteAlwaysSingleQuotesShellTokens(t *testing.T) {
 	}
 }
 
-func TestTunnelClientArgsRemainRawArgv(t *testing.T) {
+func TestTunnelClientRunArgsRemainRawArgv(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t, []string{
-		"/tmp/tunnel;client&|<>$` with'quote",
 		"run",
 		"--profile-dir",
 		"/tmp/profiles & data",
 		"--profile",
 		"docs|mcp",
-	}, TunnelClientArgs("/tmp/tunnel;client&|<>$` with'quote", "docs|mcp", "/tmp/profiles & data"))
+	}, tunnelClientRunArgs("docs|mcp", "/tmp/profiles & data"))
+}
+
+func TestDefaultRuntimeRejectsNonTmuxCommands(t *testing.T) {
+	t.Parallel()
+
+	rt := DefaultRuntime()
+	_, err := rt.Run([]string{"sh", "-c", "touch /tmp/injected"}, nil)
+	require.EqualError(t, err, "default runtime only supports tmux commands")
+	_, err = rt.RunInput([]string{"sh", "-c", "touch /tmp/injected"}, nil, "secret")
+	require.EqualError(t, err, "default runtime only supports tmux commands")
+}
+
+func TestDefaultRuntimeRejectsUnmanagedTmuxCommands(t *testing.T) {
+	t.Parallel()
+
+	rt := DefaultRuntime()
+	_, err := rt.Run([]string{"tmux", "new-session", "-d", "-s", "safe", "sh", "-c", "touch /tmp/injected"}, nil)
+	require.EqualError(t, err, "default runtime only supports managed tmux commands")
+}
+
+func TestDefaultRuntimeRejectsNonFixedProcessArgs(t *testing.T) {
+	t.Parallel()
+
+	_, err := startProcess([]string{"sh", "-c", "touch /tmp/injected"}, nil, filepath.Join(t.TempDir(), "runtime.log"))
+	require.EqualError(t, err, "default runtime only supports the fixed tunnel-client run command")
+}
+
+func TestStartOrReuseRejectsAlternateTunnelClientExecutable(t *testing.T) {
+	t.Parallel()
+
+	alternate := filepath.Join(t.TempDir(), "alternate-tunnel-client")
+	require.NoError(t, os.WriteFile(alternate, []byte("alternate"), 0o700))
+
+	_, err := StartOrReuse(
+		Runtime{},
+		"docs-mcp",
+		"docs-mcp",
+		t.TempDir(),
+		alternate,
+		state.Root{Path: t.TempDir()},
+		nil,
+		0,
+		false,
+	)
+	require.EqualError(t, err, "tunnel-client executable override must resolve to the current executable")
 }
 
 func TestProbeHealthEndpoints(t *testing.T) {
@@ -137,11 +182,12 @@ func TestStartOrReuseFallsBackToProcessMode(t *testing.T) {
 			return CompletedProcess{}, nil
 		},
 		Start: func(args []string, env map[string]string, logPath string) (Process, error) {
+			require.Equal(t, "docs-mcp", args[5])
 			return &fakeProcess{pid: os.Getpid()}, nil
 		},
 	}
 
-	result, err := StartOrReuse(rt, "docs-mcp", "docs-mcp", t.TempDir(), "/bin/tunnel-client", root, nil, 0, false)
+	result, err := StartOrReuse(rt, "docs-mcp", "docs-mcp", t.TempDir(), "", root, nil, 0, false)
 	require.NoError(t, err)
 	require.Equal(t, "process", result.Mode)
 	require.True(t, result.Launched)
@@ -151,6 +197,8 @@ func TestStartOrReuseFallsBackToProcessMode(t *testing.T) {
 func TestStartTmuxUsesSourceFileForSecretEnv(t *testing.T) {
 	t.Parallel()
 
+	executable, err := os.Executable()
+	require.NoError(t, err)
 	var gotRunArgs [][]string
 	var gotArgs []string
 	var gotStdin string
@@ -169,10 +217,10 @@ func TestStartTmuxUsesSourceFileForSecretEnv(t *testing.T) {
 		},
 	}
 
-	_, err := StartTmux(
+	_, err = StartTmux(
 		rt,
 		"tunnel-mcp__docs-mcp__deadbeef",
-		"/tmp/tunnel-client",
+		"",
 		"docs-mcp",
 		"/tmp/profiles",
 		map[string]string{"OPENAI_TUNNEL_KEY_PROD": "sk-proj-runtime-secret"},
@@ -182,20 +230,39 @@ func TestStartTmuxUsesSourceFileForSecretEnv(t *testing.T) {
 	require.Equal(t, [][]string{
 		{"tmux", "new-session", "-d", "-s", "tunnel-mcp__docs-mcp__deadbeef"},
 		{"tmux", "list-panes", "-t", "=tunnel-mcp__docs-mcp__deadbeef", "-F", "#{pane_id}"},
+		{"tmux", "respawn-pane", "-k", "-t", "%42", executable, "run", "--profile-dir", "/tmp/profiles", "--profile", "docs-mcp"},
 	}, gotRunArgs)
 	require.Equal(t, []string{"tmux", "source-file", "-"}, gotArgs)
 	require.Contains(t, gotStdin, "set-environment -t ='tunnel-mcp__docs-mcp__deadbeef' 'OPENAI_TUNNEL_KEY_PROD' 'sk-proj-runtime-secret'")
-	require.Contains(t, gotStdin, "respawn-pane -k -t '%42'")
-	require.Contains(t, gotStdin, `'\''/tmp/tunnel-client'\'' '\''run'\'' '\''--profile-dir'\'' '\''/tmp/profiles'\'' '\''--profile'\'' '\''docs-mcp'\''`)
-	require.Contains(t, gotStdin, " 2>&1'")
+	require.NotContains(t, gotStdin, "respawn-pane")
+	require.NotContains(t, gotStdin, ">>")
+	require.NotContains(t, gotStdin, "2>&1")
 	require.NotContains(t, strings.Join(gotRunArgs[0], " "), "OPENAI_TUNNEL_KEY_PROD=sk-proj-runtime-secret")
 	require.NotContains(t, strings.Join(gotRunArgs[1], " "), "OPENAI_TUNNEL_KEY_PROD=sk-proj-runtime-secret")
+	require.NotContains(t, strings.Join(gotRunArgs[2], " "), "OPENAI_TUNNEL_KEY_PROD=sk-proj-runtime-secret")
 	require.NotContains(t, strings.Join(gotArgs, " "), "OPENAI_TUNNEL_KEY_PROD=sk-proj-runtime-secret")
 }
 
-func TestStartTmuxQuotesShellCommandAndPreservesRedirection(t *testing.T) {
+func TestStartTmuxRejectsSecretEnvWithoutSourceFileRunner(t *testing.T) {
 	t.Parallel()
 
+	_, err := StartTmux(
+		Runtime{},
+		"tunnel-mcp__docs-mcp__deadbeef",
+		"",
+		"docs-mcp",
+		"/tmp/profiles",
+		map[string]string{"OPENAI_TUNNEL_KEY_PROD": "sk-proj-runtime-secret"},
+		filepath.Join(t.TempDir(), "runtime.log"),
+	)
+	require.EqualError(t, err, "tmux source-file runner is required when launch environment is set")
+}
+
+func TestStartTmuxPassesDirectCommandArgv(t *testing.T) {
+	t.Parallel()
+
+	executable, err := os.Executable()
+	require.NoError(t, err)
 	var gotArgs []string
 	rt := Runtime{
 		Run: func(args []string, env map[string]string) (CompletedProcess, error) {
@@ -205,10 +272,10 @@ func TestStartTmuxQuotesShellCommandAndPreservesRedirection(t *testing.T) {
 	}
 	logPath := filepath.Join(t.TempDir(), "runtime.log")
 
-	_, err := StartTmux(
+	_, err = StartTmux(
 		rt,
 		"tunnel-mcp__docs-mcp__deadbeef",
-		"/tmp/tunnel;client&|<>$` with'quote",
+		"",
 		"docs|mcp",
 		"/tmp/profiles & data",
 		nil,
@@ -221,35 +288,30 @@ func TestStartTmuxQuotesShellCommandAndPreservesRedirection(t *testing.T) {
 		"-d",
 		"-s",
 		"tunnel-mcp__docs-mcp__deadbeef",
-		"'/tmp/tunnel;client&|<>$` with'\\''quote' 'run' '--profile-dir' '/tmp/profiles & data' '--profile' 'docs|mcp' >> '" + logPath + "' 2>&1",
+		executable,
+		"run",
+		"--profile-dir",
+		"/tmp/profiles & data",
+		"--profile",
+		"docs|mcp",
 	}, gotArgs)
 }
 
-func TestTmuxLaunchScriptQuotesNestedShellCommand(t *testing.T) {
+func TestTmuxEnvironmentScriptQuotesValues(t *testing.T) {
 	t.Parallel()
 
 	const (
-		sessionName     = "session;name"
-		paneID          = "%42"
-		tunnelClientBin = "/tmp/tunnel;client&|<>$` with'quote"
-		profileName     = "docs|mcp"
-		profileDir      = "/tmp/profiles & data"
-		logPath         = "/tmp/runtime log"
-		envValue        = "secret; &|<>$` with'quote"
+		sessionName = "session-name"
+		envValue    = "secret; &|<>$ with'quote"
 	)
-	wantCommand := "'/tmp/tunnel;client&|<>$` with'\\''quote' 'run' '--profile-dir' '/tmp/profiles & data' '--profile' 'docs|mcp' >> '/tmp/runtime log' 2>&1"
-	wantScript := "set-environment -t ='session;name' 'OPENAI_TUNNEL_KEY_PROD' 'secret; &|<>$` with'\\''quote'\n" +
-		"respawn-pane -k -t '%42' " + shellQuote(wantCommand) + "\n"
+	wantScript := "set-environment -t ='session-name' 'OPENAI_TUNNEL_KEY_PROD' 'secret; &|<>$ with'\\''quote'\n"
 
-	require.Equal(t, wantScript, tmuxLaunchScript(
+	gotScript, err := tmuxEnvironmentScript(
 		sessionName,
-		paneID,
-		tunnelClientBin,
-		profileName,
-		profileDir,
 		map[string]string{"OPENAI_TUNNEL_KEY_PROD": envValue},
-		logPath,
-	))
+	)
+	require.NoError(t, err)
+	require.Equal(t, wantScript, gotScript)
 }
 
 func TestStartTmuxPrecreatesPrivateLogFile(t *testing.T) {
@@ -267,14 +329,14 @@ func TestStartTmuxPrecreatesPrivateLogFile(t *testing.T) {
 	_, err := StartTmux(
 		rt,
 		"tunnel-mcp__docs-mcp__deadbeef",
-		"/tmp/tunnel-client",
+		"",
 		"docs-mcp",
 		"/tmp/profiles",
 		nil,
 		logPath,
 	)
 	require.NoError(t, err)
-	require.Contains(t, strings.Join(gotArgs, " "), " >> "+shellQuote(logPath)+" 2>&1")
+	require.NotContains(t, strings.Join(gotArgs, " "), ">>")
 	info, err := os.Stat(logPath)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
@@ -295,7 +357,7 @@ func TestStartTmuxRejectsSymlinkLogFile(t *testing.T) {
 	_, err := StartTmux(
 		Runtime{},
 		"tunnel-mcp__docs-mcp__deadbeef",
-		"/tmp/tunnel-client",
+		"",
 		"docs-mcp",
 		"/tmp/profiles",
 		nil,
@@ -325,7 +387,7 @@ func TestStartTmuxCleansUpSessionWhenSourceFileFails(t *testing.T) {
 	result, err := StartTmux(
 		rt,
 		"tunnel-mcp__docs-mcp__deadbeef",
-		"/tmp/tunnel-client",
+		"",
 		"docs-mcp",
 		"/tmp/profiles",
 		map[string]string{"OPENAI_TUNNEL_KEY_PROD": "sk-proj-runtime-secret"},

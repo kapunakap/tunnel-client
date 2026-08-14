@@ -3,7 +3,7 @@ package version
 import (
 	_ "embed"
 	"os"
-	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -23,7 +23,6 @@ var (
 	semanticVersion      = fallbackSemanticVersion
 	userAgentPrefix      = ClientName + "/"
 	detectCheckoutGitSHA = detectGitSHAFromCheckout
-	runGitCommand        = runGitCommandWithExec
 )
 
 //go:embed VERSION
@@ -116,7 +115,7 @@ func detectGitSHAFromCandidateDirs(dirs []string) string {
 		if dir == "" {
 			continue
 		}
-		root := gitRootForCandidateDir(dir)
+		root := findGitRootByWalkingParents(dir)
 		if root == "" {
 			continue
 		}
@@ -127,19 +126,12 @@ func detectGitSHAFromCandidateDirs(dirs []string) string {
 		if !isTunnelClientGitRoot(root) {
 			continue
 		}
-		sha := gitOutput(root, "rev-parse", "HEAD")
+		sha := gitSHAFromRoot(root)
 		if sha != "" {
 			return sha
 		}
 	}
 	return ""
-}
-
-func gitRootForCandidateDir(dir string) string {
-	if root := gitOutput(dir, "rev-parse", "--show-toplevel"); root != "" {
-		return root
-	}
-	return findGitRootByWalkingParents(dir)
 }
 
 func findGitRootByWalkingParents(dir string) string {
@@ -156,17 +148,151 @@ func findGitRootByWalkingParents(dir string) string {
 	return ""
 }
 
-func gitOutput(dir string, args ...string) string {
-	return runGitCommand(dir, args...)
+func gitSHAFromRoot(root string) string {
+	gitDir := gitDirForRoot(root)
+	if gitDir == "" {
+		return ""
+	}
+	commonDir := gitCommonDir(gitDir)
+	if commonDir == "" {
+		return ""
+	}
+	head, ok := readGitMetadataFile(filepath.Join(gitDir, "HEAD"))
+	if !ok {
+		return ""
+	}
+	return resolveGitRevision(gitDir, commonDir, head, 0)
 }
 
-func runGitCommandWithExec(dir string, args ...string) string {
-	cmdArgs := append([]string{"-C", dir}, args...)
-	out, err := exec.Command("git", cmdArgs...).Output()
+func gitDirForRoot(root string) string {
+	dotGit := filepath.Join(root, ".git")
+	info, err := os.Stat(dotGit)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	if info.IsDir() {
+		return dotGit
+	}
+
+	gitFile, ok := readGitMetadataFile(dotGit)
+	if !ok || !strings.HasPrefix(gitFile, "gitdir:") {
+		return ""
+	}
+	gitDir := strings.TrimSpace(strings.TrimPrefix(gitFile, "gitdir:"))
+	if gitDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(root, gitDir)
+	}
+	gitDir = filepath.Clean(gitDir)
+	info, err = os.Stat(gitDir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return gitDir
+}
+
+func gitCommonDir(gitDir string) string {
+	commonDir, ok := readGitMetadataFile(filepath.Join(gitDir, "commondir"))
+	if !ok {
+		return gitDir
+	}
+	if commonDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, commonDir)
+	}
+	commonDir = filepath.Clean(commonDir)
+	info, err := os.Stat(commonDir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return commonDir
+}
+
+func resolveGitRevision(gitDir, commonDir, revision string, depth int) string {
+	const maxSymbolicRefDepth = 5
+
+	revision = strings.TrimSpace(revision)
+	if isGitObjectID(revision) {
+		return strings.ToLower(revision)
+	}
+	if depth >= maxSymbolicRefDepth || !strings.HasPrefix(revision, "ref:") {
+		return ""
+	}
+
+	ref := strings.TrimSpace(strings.TrimPrefix(revision, "ref:"))
+	if !isSafeGitRef(ref) {
+		return ""
+	}
+	for _, dir := range gitMetadataDirs(gitDir, commonDir) {
+		value, ok := readGitMetadataFile(filepath.Join(dir, filepath.FromSlash(ref)))
+		if !ok {
+			continue
+		}
+		if sha := resolveGitRevision(gitDir, commonDir, value, depth+1); sha != "" {
+			return sha
+		}
+	}
+	for _, dir := range gitMetadataDirs(gitDir, commonDir) {
+		if sha := gitSHAFromPackedRefs(filepath.Join(dir, "packed-refs"), ref); sha != "" {
+			return sha
+		}
+	}
+	return ""
+}
+
+func gitMetadataDirs(gitDir, commonDir string) []string {
+	if gitDir == commonDir {
+		return []string{gitDir}
+	}
+	return []string{gitDir, commonDir}
+}
+
+func gitSHAFromPackedRefs(packedRefsPath, ref string) string {
+	data, err := os.ReadFile(packedRefsPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[1] != ref {
+			continue
+		}
+		if isGitObjectID(fields[0]) {
+			return strings.ToLower(fields[0])
+		}
+	}
+	return ""
+}
+
+func readGitMetadataFile(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(data)), true
+}
+
+func isSafeGitRef(ref string) bool {
+	return strings.HasPrefix(ref, "refs/") &&
+		!strings.ContainsRune(ref, '\\') &&
+		!strings.ContainsRune(ref, '\x00') &&
+		path.Clean(ref) == ref
+}
+
+func isGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func isTunnelClientGitRoot(root string) bool {

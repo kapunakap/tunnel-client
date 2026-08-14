@@ -50,61 +50,77 @@ func TestDetectBuildGitSHA(t *testing.T) {
 }
 
 func TestDetectGitSHAFromCandidateDirs(t *testing.T) {
-	root := t.TempDir()
-	moduleDir := filepath.Join(root, "api", "tunnel-client")
-	versionDir := filepath.Join(moduleDir, "pkg", "version")
-	if err := os.MkdirAll(versionDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(moduleDir, "go.mod"),
-		[]byte("module github.com/openai/tunnel-client\n"),
-		0o644,
-	); err != nil {
-		t.Fatal(err)
-	}
+	const sha = "ad0e6ff2e60a55267f6f03de5bd2c2cba0e5f4e9"
 
-	originalRunGitCommand := runGitCommand
-	t.Cleanup(func() {
-		runGitCommand = originalRunGitCommand
+	t.Run("loose ref and bazel symlink", func(t *testing.T) {
+		root, versionDir := newTunnelClientCheckout(t, true)
+		gitDir := filepath.Join(root, ".git")
+		writeTestFile(t, filepath.Join(gitDir, "HEAD"), "ref: refs/heads/main\n")
+		writeTestFile(t, filepath.Join(gitDir, "refs", "heads", "main"), sha+"\n")
+
+		if got := detectGitSHAFromCandidateDirs([]string{versionDir}); got != sha {
+			t.Fatalf("expected checkout sha %q, got %q", sha, got)
+		}
+
+		bazelOutput := t.TempDir()
+		bazelBin := filepath.Join(root, "bazel-bin")
+		if err := os.Symlink(bazelOutput, bazelBin); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		got := detectGitSHAFromCandidateDirs([]string{
+			filepath.Join(bazelBin, "api", "tunnel-client", "cmd", "client"),
+		})
+		if got != sha {
+			t.Fatalf("expected checkout sha through bazel-bin symlink %q, got %q", sha, got)
+		}
 	})
 
-	sha := "ad0e6ff2e60a55267f6f03de5bd2c2cba0e5f4e9"
-	runGitCommand = func(dir string, args ...string) string {
-		if strings.Join(args, " ") == "rev-parse --show-toplevel" {
-			switch filepath.Clean(dir) {
-			case filepath.Clean(versionDir):
-				return root
-			case filepath.Clean(filepath.Join(root, "bazel-bin", "api", "tunnel-client", "cmd", "client")):
-				return ""
-			}
+	t.Run("linked worktree", func(t *testing.T) {
+		root, versionDir := newTunnelClientCheckout(t, false)
+		commonDir := filepath.Join(t.TempDir(), "common.git")
+		worktreeGitDir := filepath.Join(commonDir, "worktrees", "tunnel-client")
+		if err := os.MkdirAll(worktreeGitDir, 0o755); err != nil {
+			t.Fatal(err)
 		}
-		if filepath.Clean(dir) == filepath.Clean(root) && strings.Join(args, " ") == "rev-parse HEAD" {
-			return sha
+		writeTestFile(t, filepath.Join(root, ".git"), "gitdir: "+worktreeGitDir+"\n")
+		writeTestFile(t, filepath.Join(worktreeGitDir, "HEAD"), "ref: refs/heads/topic\n")
+		writeTestFile(t, filepath.Join(worktreeGitDir, "commondir"), "../..\n")
+		writeTestFile(t, filepath.Join(commonDir, "refs", "heads", "topic"), sha+"\n")
+
+		if got := detectGitSHAFromCandidateDirs([]string{versionDir}); got != sha {
+			t.Fatalf("expected linked-worktree sha %q, got %q", sha, got)
 		}
-		return ""
-	}
-
-	got := detectGitSHAFromCandidateDirs([]string{versionDir})
-	if got != sha {
-		t.Fatalf("expected checkout sha %q, got %q", sha, got)
-	}
-
-	bazelOutput := t.TempDir()
-	bazelBin := filepath.Join(root, "bazel-bin")
-	if err := os.Symlink(bazelOutput, bazelBin); err != nil {
-		t.Fatal(err)
-	}
-
-	got = detectGitSHAFromCandidateDirs([]string{
-		filepath.Join(bazelBin, "api", "tunnel-client", "cmd", "client"),
 	})
-	if got != sha {
-		t.Fatalf("expected checkout sha through bazel-bin symlink %q, got %q", sha, got)
-	}
+
+	t.Run("detached head", func(t *testing.T) {
+		root, versionDir := newTunnelClientCheckout(t, false)
+		writeTestFile(t, filepath.Join(root, ".git", "HEAD"), sha+"\n")
+
+		if got := detectGitSHAFromCandidateDirs([]string{versionDir}); got != sha {
+			t.Fatalf("expected detached-head sha %q, got %q", sha, got)
+		}
+	})
+
+	t.Run("packed ref", func(t *testing.T) {
+		root, versionDir := newTunnelClientCheckout(t, false)
+		gitDir := filepath.Join(root, ".git")
+		writeTestFile(t, filepath.Join(gitDir, "HEAD"), "ref: refs/heads/main\n")
+		writeTestFile(t, filepath.Join(gitDir, "packed-refs"), "# pack-refs with: peeled fully-peeled sorted\n"+sha+" refs/heads/main\n")
+
+		if got := detectGitSHAFromCandidateDirs([]string{versionDir}); got != sha {
+			t.Fatalf("expected packed-ref sha %q, got %q", sha, got)
+		}
+	})
+
+	t.Run("rejects unsafe ref", func(t *testing.T) {
+		root, versionDir := newTunnelClientCheckout(t, false)
+		writeTestFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/../../outside\n")
+		writeTestFile(t, filepath.Join(root, ".git", "outside"), sha+"\n")
+
+		if got := detectGitSHAFromCandidateDirs([]string{versionDir}); got != "" {
+			t.Fatalf("expected no sha for unsafe ref, got %q", got)
+		}
+	})
 }
 
 func TestFindGitRootByWalkingParentsStopsAtRoot(t *testing.T) {
@@ -126,7 +142,11 @@ func TestInitVersionUpdatesGlobals(t *testing.T) {
 
 	semanticVersion = "1.2.3"
 	userAgentPrefix = "oai-tunnel-client/"
-	detectCheckoutGitSHA = func() string { return "" }
+	checkoutCalled := false
+	detectCheckoutGitSHA = func() string {
+		checkoutCalled = true
+		return "checkout-sha"
+	}
 	GitSHA = ""
 	SemanticVersion = ""
 	Version = ""
@@ -154,6 +174,9 @@ func TestInitVersionUpdatesGlobals(t *testing.T) {
 	if GitSHA != "deadbeef" {
 		t.Fatalf("expected GitSHA to be set, got %q", GitSHA)
 	}
+	if checkoutCalled {
+		t.Fatal("expected build info sha to win over checkout detection")
+	}
 	if ClientName != "oai-tunnel-client" {
 		t.Fatalf("expected ClientName to identify tunnel-client, got %q", ClientName)
 	}
@@ -165,6 +188,99 @@ func TestInitVersionUpdatesGlobals(t *testing.T) {
 	}
 	if UserAgent != "oai-tunnel-client/1.2.3+deadbeef" {
 		t.Fatalf("expected UserAgent to include version, got %q", UserAgent)
+	}
+}
+
+func TestInitVersionPreservesInjectedGitSHA(t *testing.T) {
+	originalSemanticVersion := semanticVersion
+	originalSourceSemanticVersion := sourceSemanticVersion
+	originalUserAgentPrefix := userAgentPrefix
+	originalDetectCheckoutGitSHA := detectCheckoutGitSHA
+	originalGitSHA := GitSHA
+	originalSemanticVersionGlobal := SemanticVersion
+	originalVersion := Version
+	originalUserAgent := UserAgent
+
+	semanticVersion = "1.2.3"
+	userAgentPrefix = "oai-tunnel-client/"
+	detectCheckoutGitSHA = func() string {
+		t.Fatal("checkout detection should not run for injected GitSHA")
+		return ""
+	}
+	GitSHA = "injected-sha"
+	SemanticVersion = ""
+	Version = ""
+	UserAgent = ""
+
+	t.Cleanup(func() {
+		semanticVersion = originalSemanticVersion
+		sourceSemanticVersion = originalSourceSemanticVersion
+		userAgentPrefix = originalUserAgentPrefix
+		detectCheckoutGitSHA = originalDetectCheckoutGitSHA
+		GitSHA = originalGitSHA
+		SemanticVersion = originalSemanticVersionGlobal
+		Version = originalVersion
+		UserAgent = originalUserAgent
+	})
+
+	readBuildInfo := func() (*debug.BuildInfo, bool) {
+		t.Fatal("build info should not be read for injected GitSHA")
+		return nil, false
+	}
+
+	initVersion(readBuildInfo)
+
+	if GitSHA != "injected-sha" {
+		t.Fatalf("expected injected GitSHA to be preserved, got %q", GitSHA)
+	}
+	if Version != "1.2.3+injected-sha" {
+		t.Fatalf("expected Version to include injected sha, got %q", Version)
+	}
+}
+
+func TestInitVersionFallsBackToCheckoutGitSHA(t *testing.T) {
+	originalSemanticVersion := semanticVersion
+	originalSourceSemanticVersion := sourceSemanticVersion
+	originalUserAgentPrefix := userAgentPrefix
+	originalDetectCheckoutGitSHA := detectCheckoutGitSHA
+	originalGitSHA := GitSHA
+	originalSemanticVersionGlobal := SemanticVersion
+	originalVersion := Version
+	originalUserAgent := UserAgent
+
+	semanticVersion = "1.2.3"
+	userAgentPrefix = "oai-tunnel-client/"
+	detectCheckoutGitSHA = func() string {
+		return "checkout-sha"
+	}
+	GitSHA = ""
+	SemanticVersion = ""
+	Version = ""
+	UserAgent = ""
+
+	t.Cleanup(func() {
+		semanticVersion = originalSemanticVersion
+		sourceSemanticVersion = originalSourceSemanticVersion
+		userAgentPrefix = originalUserAgentPrefix
+		detectCheckoutGitSHA = originalDetectCheckoutGitSHA
+		GitSHA = originalGitSHA
+		SemanticVersion = originalSemanticVersionGlobal
+		Version = originalVersion
+		UserAgent = originalUserAgent
+	})
+
+	emptyRead := func() (*debug.BuildInfo, bool) { return nil, false }
+
+	initVersion(emptyRead)
+
+	if GitSHA != "checkout-sha" {
+		t.Fatalf("expected checkout GitSHA fallback, got %q", GitSHA)
+	}
+	if Version != "1.2.3+checkout-sha" {
+		t.Fatalf("expected Version to include checkout sha, got %q", Version)
+	}
+	if UserAgent != "oai-tunnel-client/1.2.3+checkout-sha" {
+		t.Fatalf("expected UserAgent to include checkout sha, got %q", UserAgent)
 	}
 }
 
@@ -210,5 +326,32 @@ func TestInitVersionUsesSourceVersionWhenBuildVersionIsFallback(t *testing.T) {
 	}
 	if UserAgent != "oai-tunnel-client/4.5.6" {
 		t.Fatalf("expected UserAgent from source VERSION, got %q", UserAgent)
+	}
+}
+
+func newTunnelClientCheckout(t *testing.T, nestedModule bool) (string, string) {
+	t.Helper()
+
+	root := t.TempDir()
+	moduleDir := root
+	if nestedModule {
+		moduleDir = filepath.Join(root, "api", "tunnel-client")
+	}
+	versionDir := filepath.Join(moduleDir, "pkg", "version")
+	if err := os.MkdirAll(versionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(moduleDir, "go.mod"), "module github.com/openai/tunnel-client\n")
+	return root, versionDir
+}
+
+func writeTestFile(t *testing.T, path, contents string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

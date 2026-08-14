@@ -107,8 +107,18 @@ func TestRuntimesCreateConnectStatusStopJSON(t *testing.T) {
 				}
 				return session.CompletedProcess{ReturnCode: 1}, nil
 			}
-			if len(args) >= 6 && args[0] == "tmux" && args[1] == "new-session" {
-				name := args[len(args)-2]
+			if len(args) >= 2 && args[0] == "tmux" && args[1] == "list-panes" {
+				return session.CompletedProcess{ReturnCode: 0, Stdout: "%42\n"}, nil
+			}
+			if len(args) >= 5 && args[0] == "tmux" && args[1] == "new-session" {
+				name := ""
+				for index := 0; index+1 < len(args); index++ {
+					if args[index] == "-s" {
+						name = args[index+1]
+						break
+					}
+				}
+				require.NotEmpty(t, name)
 				activeTmuxSessions[name] = true
 				healthPath := filepath.Join(codexHome, "health", "docs-mcp.url")
 				require.NoError(t, os.MkdirAll(filepath.Dir(healthPath), 0o755))
@@ -121,6 +131,11 @@ func TestRuntimesCreateConnectStatusStopJSON(t *testing.T) {
 				return session.CompletedProcess{ReturnCode: 0}, nil
 			}
 			return session.CompletedProcess{}, nil
+		},
+		RunInput: func(args []string, env map[string]string, stdin string) (session.CompletedProcess, error) {
+			require.Equal(t, []string{"tmux", "source-file", "-"}, args)
+			require.Contains(t, stdin, "set-environment")
+			return session.CompletedProcess{ReturnCode: 0}, nil
 		},
 		Start: func(args []string, env map[string]string, logPath string) (session.Process, error) {
 			t.Fatalf("unexpected process start fallback: %v", args)
@@ -231,6 +246,27 @@ func TestRuntimesConnectHelpExplainsManagedSupervision(t *testing.T) {
 	require.Contains(t, output, "managed local runtime supervision")
 	require.Contains(t, output, "instead of nohup or disown")
 	require.Contains(t, output, "tunnel-client runtimes status <alias>")
+}
+
+func TestValidateTunnelClientBinOverrideAcceptsCurrentExecutable(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, validateTunnelClientBinOverride(currentExecutablePath()))
+}
+
+func TestRuntimesConnectRejectsAlternateTunnelClientBin(t *testing.T) {
+	t.Parallel()
+
+	alternate := filepath.Join(t.TempDir(), "alternate-tunnel-client")
+	require.NoError(t, os.WriteFile(alternate, []byte("alternate"), 0o700))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newRuntimesCommandWithRuntime(lookupEnvMap(map[string]string{}), &stdout, &stderr, session.DefaultRuntime())
+	cmd.SetArgs([]string{"connect", "--alias", "docs-mcp", "--tunnel-client-bin", alternate})
+
+	err := cmd.Execute()
+	require.EqualError(t, err, "--tunnel-client-bin only accepts the current tunnel-client executable")
 }
 
 func TestRuntimesListRejectsMultipleOrganizationIDs(t *testing.T) {

@@ -31,7 +31,12 @@ const (
 	terminateWaitDuration    = 1 * time.Second
 )
 
-var profileNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var (
+	profileNamePattern     = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+	tmuxSessionNamePattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._-]*$")
+	tmuxPaneIDPattern      = regexp.MustCompile("^%[0-9]+$")
+	envNamePattern         = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_]*$")
+)
 
 type Target struct {
 	Kind  string
@@ -91,6 +96,9 @@ type Process interface {
 	Poll() *int
 }
 
+// Starter is kept argv-shaped for compatibility with callers that provide a
+// test or embedding runtime. DefaultRuntime validates that argv is the fixed
+// tunnel-client re-exec shape before it starts a process.
 type Starter func(args []string, env map[string]string, logPath string) (Process, error)
 
 type Runtime struct {
@@ -101,8 +109,8 @@ type Runtime struct {
 
 func DefaultRuntime() Runtime {
 	return Runtime{
-		Run:      runCommand,
-		RunInput: runCommandWithInput,
+		Run:      runTmuxCommand,
+		RunInput: runTmuxCommandWithInput,
 		Start:    startProcess,
 	}
 }
@@ -201,6 +209,7 @@ func WriteRuntimeProfile(
 		"log": map[string]any{
 			"level":  "info",
 			"format": "json",
+			"file":   LogPath(normalizedAlias, root),
 		},
 		"mcp": mcpConfig(target),
 	}
@@ -229,9 +238,8 @@ func TmuxSessionName(alias string, root state.Root) string {
 	return fmt.Sprintf("tunnel-mcp__%s__%x", mustNormalizeAlias(alias), sum[:4])
 }
 
-func TunnelClientArgs(tunnelClientBin string, profileName string, profileDir string) []string {
+func tunnelClientRunArgs(profileName string, profileDir string) []string {
 	return []string{
-		tunnelClientBin,
 		"run",
 		"--profile-dir",
 		profileDir,
@@ -240,6 +248,14 @@ func TunnelClientArgs(tunnelClientBin string, profileName string, profileDir str
 	}
 }
 
+// TunnelClientArgs is retained for callers that render or inspect a launch
+// command. StartOrReuse never trusts tunnelClientBin for process execution.
+func TunnelClientArgs(tunnelClientBin string, profileName string, profileDir string) []string {
+	return append([]string{tunnelClientBin}, tunnelClientRunArgs(profileName, profileDir)...)
+}
+
+// TunnelClientCommand is retained for callers that render or inspect a launch
+// command. StartOrReuse reports the current executable's command instead.
 func TunnelClientCommand(tunnelClientBin string, profileName string, profileDir string) string {
 	parts := TunnelClientArgs(tunnelClientBin, profileName, profileDir)
 	quoted := make([]string, 0, len(parts))
@@ -247,6 +263,49 @@ func TunnelClientCommand(tunnelClientBin string, profileName string, profileDir 
 		quoted = append(quoted, shellQuote(part))
 	}
 	return strings.Join(quoted, " ")
+}
+
+func currentTunnelClientInvocation(profileName string, profileDir string) ([]string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve current tunnel-client executable: %w", err)
+	}
+	return append([]string{executable}, tunnelClientRunArgs(profileName, profileDir)...), nil
+}
+
+func currentTunnelClientCommand(profileName string, profileDir string) (string, error) {
+	parts, err := currentTunnelClientInvocation(profileName, profileDir)
+	if err != nil {
+		return "", err
+	}
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		quoted = append(quoted, shellQuote(part))
+	}
+	return strings.Join(quoted, " "), nil
+}
+
+func validateTunnelClientBin(tunnelClientBin string) error {
+	tunnelClientBin = strings.TrimSpace(tunnelClientBin)
+	if tunnelClientBin == "" {
+		return nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve current tunnel-client executable: %w", err)
+	}
+	currentInfo, err := os.Stat(executable)
+	if err != nil {
+		return fmt.Errorf("stat current tunnel-client executable %q: %w", executable, err)
+	}
+	requestedInfo, err := os.Stat(tunnelClientBin)
+	if err != nil {
+		return fmt.Errorf("stat requested tunnel-client executable %q: %w", tunnelClientBin, err)
+	}
+	if !os.SameFile(currentInfo, requestedInfo) {
+		return fmt.Errorf("tunnel-client executable override must resolve to the current executable")
+	}
+	return nil
 }
 
 func StartOrReuse(
@@ -260,8 +319,14 @@ func StartOrReuse(
 	existingPID int,
 	replaceExisting bool,
 ) (LaunchResult, error) {
+	if err := validateTunnelClientBin(tunnelClientBin); err != nil {
+		return LaunchResult{}, err
+	}
 	sessionName := TmuxSessionName(alias, root)
-	command := TunnelClientCommand(tunnelClientBin, profileName, profileDir)
+	command, err := currentTunnelClientCommand(profileName, profileDir)
+	if err != nil {
+		return LaunchResult{}, err
+	}
 	logPath := LogPath(alias, root)
 
 	if available, _ := TmuxAvailable(rt); available {
@@ -339,7 +404,11 @@ func StartOrReuse(
 	}
 
 	ClearHealthURLFile(alias, root)
-	process, err := rt.Start(TunnelClientArgs(tunnelClientBin, profileName, profileDir), childEnv(envOverrides), logPath)
+	args, err := currentTunnelClientInvocation(profileName, profileDir)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	process, err := rt.Start(args, childEnv(envOverrides), logPath)
 	if err != nil {
 		return LaunchResult{}, err
 	}
@@ -405,10 +474,19 @@ func TmuxHasSessionName(rt Runtime, sessionName string) (bool, error) {
 }
 
 func StartTmux(rt Runtime, sessionName string, tunnelClientBin string, profileName string, profileDir string, env map[string]string, logPath string) (CompletedProcess, error) {
+	if err := validateTunnelClientBin(tunnelClientBin); err != nil {
+		return CompletedProcess{}, err
+	}
+	if err := validateTmuxSessionName(sessionName); err != nil {
+		return CompletedProcess{}, err
+	}
 	if err := ensurePrivateLogFile(logPath); err != nil {
 		return CompletedProcess{}, err
 	}
-	if len(env) > 0 && rt.RunInput != nil {
+	if len(env) > 0 {
+		if rt.RunInput == nil {
+			return CompletedProcess{}, fmt.Errorf("tmux source-file runner is required when launch environment is set")
+		}
 		if result, err := rt.Run([]string{"tmux", "new-session", "-d", "-s", sessionName}, nil); err != nil {
 			return result, err
 		} else if result.ReturnCode != 0 {
@@ -422,7 +500,26 @@ func StartTmux(rt Runtime, sessionName string, tunnelClientBin string, profileNa
 			cleanupSession()
 			return CompletedProcess{}, err
 		}
-		result, err := rt.RunInput([]string{"tmux", "source-file", "-"}, nil, tmuxLaunchScript(sessionName, paneID, tunnelClientBin, profileName, profileDir, env, logPath))
+		script, err := tmuxEnvironmentScript(sessionName, env)
+		if err != nil {
+			cleanupSession()
+			return CompletedProcess{}, err
+		}
+		result, err := rt.RunInput([]string{"tmux", "source-file", "-"}, nil, script)
+		if err != nil {
+			cleanupSession()
+			return result, err
+		}
+		if result.ReturnCode != 0 {
+			cleanupSession()
+			return result, nil
+		}
+		commandArgs, err := currentTunnelClientInvocation(profileName, profileDir)
+		if err != nil {
+			cleanupSession()
+			return CompletedProcess{}, err
+		}
+		result, err = rt.Run(append([]string{"tmux", "respawn-pane", "-k", "-t", paneID}, commandArgs...), nil)
 		if err != nil {
 			cleanupSession()
 			return result, err
@@ -432,31 +529,33 @@ func StartTmux(rt Runtime, sessionName string, tunnelClientBin string, profileNa
 		}
 		return result, nil
 	}
-	args := []string{"tmux", "new-session", "-d"}
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
+	commandArgs, err := currentTunnelClientInvocation(profileName, profileDir)
+	if err != nil {
+		return CompletedProcess{}, err
 	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		args = append(args, "-e", key+"="+env[key])
-	}
-	args = append(args, "-s", sessionName, logShellCommand(TunnelClientCommand(tunnelClientBin, profileName, profileDir), logPath))
+	// tmux directly execs a shell-command supplied as multiple arguments.
+	// Keep the invocation split so profile values are never shell syntax.
+	args := append([]string{"tmux", "new-session", "-d", "-s", sessionName}, commandArgs...)
 	return rt.Run(args, childEnv(env))
 }
 
-func tmuxLaunchScript(sessionName string, paneID string, tunnelClientBin string, profileName string, profileDir string, env map[string]string, logPath string) string {
-	lines := make([]string, 0, len(env)+1)
+func tmuxEnvironmentScript(sessionName string, env map[string]string) (string, error) {
+	if err := validateTmuxSessionName(sessionName); err != nil {
+		return "", err
+	}
+	lines := make([]string, 0, len(env))
 	keys := make([]string, 0, len(env))
 	for key := range env {
+		if !envNamePattern.MatchString(key) {
+			return "", fmt.Errorf("tmux environment name %q must use letters, numbers or underscore", key)
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
 		lines = append(lines, fmt.Sprintf("set-environment -t =%s %s %s", shellQuote(sessionName), shellQuote(key), shellQuote(env[key])))
 	}
-	lines = append(lines, fmt.Sprintf("respawn-pane -k -t %s %s", shellQuote(paneID), shellQuote(logShellCommand(TunnelClientCommand(tunnelClientBin, profileName, profileDir), logPath))))
-	return strings.Join(lines, "\n") + "\n"
+	return strings.Join(lines, "\n") + "\n", nil
 }
 
 func tmuxFirstPaneID(rt Runtime, sessionName string) (string, error) {
@@ -469,6 +568,9 @@ func tmuxFirstPaneID(rt Runtime, sessionName string) (string, error) {
 	}
 	for _, line := range strings.Split(result.Stdout, "\n") {
 		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			if !tmuxPaneIDPattern.MatchString(trimmed) {
+				return "", fmt.Errorf("tmux list-panes returned invalid pane id %q", trimmed)
+			}
 			return trimmed, nil
 		}
 	}
@@ -527,13 +629,6 @@ func ensurePrivateLogFile(pathValue string) error {
 		return fmt.Errorf("close log file %s: %w", pathValue, err)
 	}
 	return nil
-}
-
-func logShellCommand(command string, logPath string) string {
-	if strings.TrimSpace(logPath) == "" {
-		return command
-	}
-	return command + " >> " + shellQuote(logPath) + " 2>&1"
 }
 
 func WaitForRuntimeHealth(rt Runtime, alias string, root state.Root, mode string, pid int, sessionName string) RuntimeObservation {
@@ -595,12 +690,16 @@ func WaitForProcessExit(pid int) bool {
 	return !PIDIsRunning(pid)
 }
 
-func runCommand(args []string, env map[string]string) (CompletedProcess, error) {
-	return runCommandWithInput(args, env, "")
+func runTmuxCommand(args []string, env map[string]string) (CompletedProcess, error) {
+	return runTmuxCommandWithInput(args, env, "")
 }
 
-func runCommandWithInput(args []string, env map[string]string, stdin string) (CompletedProcess, error) {
-	cmd := exec.Command(args[0], args[1:]...)
+func runTmuxCommandWithInput(args []string, env map[string]string, stdin string) (CompletedProcess, error) {
+	tmuxArgs, err := validatedTmuxArgs(args)
+	if err != nil {
+		return CompletedProcess{}, err
+	}
+	cmd := exec.Command("tmux", tmuxArgs...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -611,7 +710,7 @@ func runCommandWithInput(args []string, env map[string]string, stdin string) (Co
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	result := CompletedProcess{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err == nil {
 		return result, nil
@@ -622,6 +721,93 @@ func runCommandWithInput(args []string, env map[string]string, stdin string) (Co
 		return result, nil
 	}
 	return result, err
+}
+
+func validatedTmuxArgs(args []string) ([]string, error) {
+	if len(args) == 0 || args[0] != "tmux" {
+		return nil, fmt.Errorf("default runtime only supports tmux commands")
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("default runtime only supports managed tmux commands")
+	}
+	switch args[1] {
+	case "-V":
+		if len(args) == 2 {
+			return []string{"-V"}, nil
+		}
+	case "has-session":
+		if len(args) == 4 && args[2] == "-t" {
+			if err := validateTmuxTarget(args[3]); err != nil {
+				return nil, err
+			}
+			return []string{"has-session", "-t", args[3]}, nil
+		}
+	case "new-session":
+		if len(args) >= 5 && args[2] == "-d" && args[3] == "-s" {
+			if err := validateTmuxSessionName(args[4]); err != nil {
+				return nil, err
+			}
+			if len(args) == 5 {
+				return []string{"new-session", "-d", "-s", args[4]}, nil
+			}
+			if len(args) == 11 {
+				profileName, profileDir, err := fixedTunnelClientRunArgs(args[5:])
+				if err != nil {
+					return nil, err
+				}
+				invocation, err := currentTunnelClientInvocation(profileName, profileDir)
+				if err != nil {
+					return nil, err
+				}
+				return append([]string{"new-session", "-d", "-s", args[4]}, invocation...), nil
+			}
+		}
+	case "list-panes":
+		if len(args) == 6 && args[2] == "-t" && args[4] == "-F" && args[5] == "#{pane_id}" {
+			if err := validateTmuxTarget(args[3]); err != nil {
+				return nil, err
+			}
+			return []string{"list-panes", "-t", args[3], "-F", "#{pane_id}"}, nil
+		}
+	case "kill-session":
+		if len(args) == 4 && args[2] == "-t" {
+			if err := validateTmuxTarget(args[3]); err != nil {
+				return nil, err
+			}
+			return []string{"kill-session", "-t", args[3]}, nil
+		}
+	case "source-file":
+		if len(args) == 3 && args[2] == "-" {
+			return []string{"source-file", "-"}, nil
+		}
+	case "respawn-pane":
+		if len(args) == 11 && args[2] == "-k" && args[3] == "-t" && tmuxPaneIDPattern.MatchString(args[4]) {
+			profileName, profileDir, err := fixedTunnelClientRunArgs(args[5:])
+			if err != nil {
+				return nil, err
+			}
+			invocation, err := currentTunnelClientInvocation(profileName, profileDir)
+			if err != nil {
+				return nil, err
+			}
+			return append([]string{"respawn-pane", "-k", "-t", args[4]}, invocation...), nil
+		}
+	}
+	return nil, fmt.Errorf("default runtime only supports managed tmux commands")
+}
+
+func validateTmuxTarget(target string) error {
+	if !strings.HasPrefix(target, "=") {
+		return fmt.Errorf("tmux target must use an exact session name")
+	}
+	return validateTmuxSessionName(strings.TrimPrefix(target, "="))
+}
+
+func validateTmuxSessionName(sessionName string) error {
+	if !tmuxSessionNamePattern.MatchString(sessionName) {
+		return fmt.Errorf("tmux session name must use letters, numbers, '.', '_' or '-'")
+	}
+	return nil
 }
 
 type osProcess struct {
@@ -649,6 +835,14 @@ func (p *osProcess) Poll() *int {
 }
 
 func startProcess(args []string, env map[string]string, logPath string) (Process, error) {
+	profileName, profileDir, err := fixedTunnelClientRunArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve current tunnel-client executable: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create log directory %s: %w", filepath.Dir(logPath), err)
 	}
@@ -656,7 +850,7 @@ func startProcess(args []string, env map[string]string, logPath string) (Process
 	if err != nil {
 		return nil, fmt.Errorf("open log file %s: %w", logPath, err)
 	}
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.Command(executable, "run", "--profile-dir", profileDir, "--profile", profileName)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -682,6 +876,19 @@ func startProcess(args []string, env map[string]string, logPath string) (Process
 		waitCh <- 1
 	}()
 	return &osProcess{cmd: cmd, waitCh: waitCh}, nil
+}
+
+func fixedTunnelClientRunArgs(args []string) (string, string, error) {
+	if len(args) != 6 ||
+		args[1] != "run" ||
+		args[2] != "--profile-dir" ||
+		args[4] != "--profile" {
+		return "", "", fmt.Errorf("default runtime only supports the fixed tunnel-client run command")
+	}
+	if err := validateTunnelClientBin(args[0]); err != nil {
+		return "", "", err
+	}
+	return args[5], args[3], nil
 }
 
 func exitCodeAfterLaunch(process Process) *int {

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -103,6 +105,9 @@ func newRuntimesCommandWithRuntime(lookupEnv func(string) (string, bool), stdout
 			if err != nil {
 				return err
 			}
+			if err := validateTunnelClientBinOverride(tunnelClientBin); err != nil {
+				return err
+			}
 			payload, runErr := manager.Connect(codexplugin.ConnectOptions{
 				CreateOptions: codexplugin.CreateOptions{
 					Alias:               alias,
@@ -121,7 +126,7 @@ func newRuntimesCommandWithRuntime(lookupEnv func(string) (string, bool), stdout
 				MCPServerURL:  mcpServerURL,
 				MCPCommand:    mcpCommand,
 				RuntimeAPIKey: runtimeAPIKey,
-				TunnelBin:     chooseTunnelClientBin(tunnelClientBin),
+				TunnelBin:     tunnelClientBin,
 			})
 			if runErr != nil {
 				return maybeWritePayloadError(cmd, common.jsonOutput, payload, runErr)
@@ -144,7 +149,7 @@ func newRuntimesCommandWithRuntime(lookupEnv func(string) (string, bool), stdout
 	connectCmd.Flags().StringVar(&mcpServerURL, "mcp-server-url", "", "Remote MCP server URL")
 	connectCmd.Flags().StringVar(&mcpCommand, "mcp-command", "", "Local stdio MCP command")
 	connectCmd.Flags().StringVar(&runtimeAPIKey, "runtime-api-key", "", "Runtime key reference to store in generated config")
-	connectCmd.Flags().StringVar(&tunnelClientBin, "tunnel-client-bin", "", "Override the tunnel-client binary path used for the launched runtime")
+	connectCmd.Flags().StringVar(&tunnelClientBin, "tunnel-client-bin", "", "Compatibility flag; only the current tunnel-client executable is accepted")
 	_ = connectCmd.MarkFlagRequired("alias")
 	cmd.AddCommand(connectCmd)
 
@@ -338,12 +343,25 @@ func maybeWritePayloadError(cmd *cobra.Command, jsonOutput bool, payload map[str
 	return err
 }
 
-func chooseTunnelClientBin(explicit string) string {
-	if explicit != "" {
-		return explicit
+func validateTunnelClientBinOverride(explicit string) error {
+	explicit = strings.TrimSpace(explicit)
+	if explicit == "" {
+		return nil
 	}
-	if current := currentExecutablePath(); current != "" {
-		return current
+	current := currentExecutablePath()
+	if current == "" {
+		return fmt.Errorf("validate --tunnel-client-bin: resolve current executable")
 	}
-	return "tunnel-client"
+	currentInfo, err := os.Stat(current)
+	if err != nil {
+		return fmt.Errorf("validate --tunnel-client-bin current executable %q: %w", current, err)
+	}
+	explicitInfo, err := os.Stat(explicit)
+	if err != nil {
+		return fmt.Errorf("validate --tunnel-client-bin %q: %w", explicit, err)
+	}
+	if !os.SameFile(currentInfo, explicitInfo) {
+		return fmt.Errorf("--tunnel-client-bin only accepts the current tunnel-client executable")
+	}
+	return nil
 }

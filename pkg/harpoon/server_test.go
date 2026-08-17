@@ -52,6 +52,87 @@ func TestListTargetsDoesNotExposeURLs(t *testing.T) {
 	require.NotContains(t, string(payload), "https://")
 }
 
+func TestGetOAuthTargetAudienceReturnsExactTokenEndpointURL(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry, err := NewRegistry(logger, false, []Target{{
+		Label:    "oauth-token-endpoint-0",
+		Category: "oauth",
+		Source:   "oauth",
+		Tags:     []string{"auth-server-metadata", "token-endpoint"},
+		BaseURL:  mustParseURL(t, "https://AUTH.internal/oauth//token"),
+	}})
+	require.NoError(t, err)
+	server, err := NewServer(&config.HarpoonConfig{
+		MaxResponseBytes: config.DefaultHarpoonMaxResponseBytes,
+		MaxRedirects:     config.DefaultHarpoonMaxRedirects,
+	}, registry, NewCallBuffer(), logger)
+	require.NoError(t, err)
+
+	resp, err := server.getOAuthTargetAudience(oauthTargetAudienceRequest{
+		Label: "oauth-token-endpoint-0",
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "https://AUTH.internal/oauth//token", resp.Audience)
+}
+
+func TestGetOAuthTargetAudienceRejectsNonTokenEndpoint(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry, err := NewRegistry(logger, false, []Target{{
+		Label:    "oauth-registration-endpoint-0",
+		Category: "oauth",
+		Source:   "oauth",
+		Tags:     []string{"auth-server-metadata", "registration-endpoint"},
+		BaseURL:  mustParseURL(t, "https://auth.internal/oauth/register"),
+	}})
+	require.NoError(t, err)
+	server, err := NewServer(&config.HarpoonConfig{
+		MaxResponseBytes: config.DefaultHarpoonMaxResponseBytes,
+		MaxRedirects:     config.DefaultHarpoonMaxRedirects,
+	}, registry, NewCallBuffer(), logger)
+	require.NoError(t, err)
+
+	_, err = server.getOAuthTargetAudience(oauthTargetAudienceRequest{
+		Label: "oauth-registration-endpoint-0",
+	})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not an OAuth token endpoint")
+	require.NotContains(t, err.Error(), "https://auth.internal")
+}
+
+func TestGetOAuthTargetAudienceRejectsCredentialedOrFragmentURL(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://user:secret@auth.internal/oauth/token",
+		"https://auth.internal/oauth/token#fragment",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			registry, err := NewRegistry(logger, false, []Target{{
+				Label:    "oauth-token-endpoint-0",
+				Category: "oauth",
+				Source:   "oauth",
+				Tags:     []string{"auth-server-metadata", "token-endpoint"},
+				BaseURL:  mustParseURL(t, rawURL),
+			}})
+			require.NoError(t, err)
+			server, err := NewServer(&config.HarpoonConfig{
+				MaxResponseBytes: config.DefaultHarpoonMaxResponseBytes,
+				MaxRedirects:     config.DefaultHarpoonMaxRedirects,
+			}, registry, NewCallBuffer(), logger)
+			require.NoError(t, err)
+
+			_, err = server.getOAuthTargetAudience(oauthTargetAudienceRequest{
+				Label: "oauth-token-endpoint-0",
+			})
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "cannot be used as an OAuth audience")
+			require.NotContains(t, err.Error(), rawURL)
+		})
+	}
+}
+
 func TestCallTargetRedactsURLFromLogsWithoutChangingRequest(t *testing.T) {
 	requestURI := make(chan string, 1)
 	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

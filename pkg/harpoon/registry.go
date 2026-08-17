@@ -31,6 +31,8 @@ type Target struct {
 	InclusionReason string
 	BaseURL         *url.URL
 	UnixSocketPath  string
+	// originalURL preserves discovery spelling for OAuth audiences; BaseURL is normalized for routing.
+	originalURL *url.URL
 }
 
 // Registry stores allowed targets keyed by label.
@@ -138,6 +140,7 @@ func (r *Registry) RegisterTarget(target Target) error {
 	if err != nil {
 		return fmt.Errorf("harpoon: target %q base URL is invalid: %w", label, err)
 	}
+	original := *target.BaseURL
 
 	category, source := normalizeCategorySource(target.Category, target.Source)
 	cleanTarget := Target{
@@ -149,6 +152,7 @@ func (r *Registry) RegisterTarget(target Target) error {
 		InclusionReason: strings.TrimSpace(target.InclusionReason),
 		BaseURL:         normalized,
 		UnixSocketPath:  strings.TrimSpace(target.UnixSocketPath),
+		originalURL:     &original,
 	}
 
 	r.mu.Lock()

@@ -586,6 +586,12 @@ registered. If there are no targets, `harpoon` commands return
     - `sources`: OR match within sources.
     - `tags`: ALL requested tags must be present on the target.
     - Filters combine with AND across fields.
+  - `list_targets` continues to omit target URLs. The separate read-only
+    `get_oauth_target_audience` tool is an explicit, narrow exception for
+    auto-registered OAuth `token-endpoint` targets: it returns only the
+    exact upstream token URL needed as a `private_key_jwt` audience.
+    Generic configured targets, non-token OAuth targets, credentialed URLs,
+    and fragment-bearing URLs are rejected.
 - **Allow plaintext HTTP**
   - Flag: `--harpoon.allow-plaintext-http`
   - Env: `HARPOON_ALLOW_PLAINTEXT_HTTP`

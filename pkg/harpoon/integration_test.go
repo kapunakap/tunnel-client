@@ -418,6 +418,14 @@ func TestHarpoonToolSchemas(t *testing.T) {
 	require.NotNil(t, listTargets.InputSchema, "list_targets input schema should be present")
 	require.NotNil(t, listTargets.OutputSchema, "list_targets output schema should be present")
 
+	oauthAudience := tools["get_oauth_target_audience"]
+	require.NotNil(t, oauthAudience, "get_oauth_target_audience tool should be present")
+	require.NotNil(t, oauthAudience.InputSchema, "audience input schema should be present")
+	require.NotNil(t, oauthAudience.OutputSchema, "audience output schema should be present")
+	require.NotNil(t, oauthAudience.Annotations)
+	require.True(t, oauthAudience.Annotations.ReadOnlyHint)
+	require.True(t, oauthAudience.Annotations.IdempotentHint)
+
 	expectedCallTargetInput := json.RawMessage(`{
 		"type": "object",
 		"required": ["label", "method"],
@@ -591,6 +599,36 @@ func TestHarpoonToolSchemas(t *testing.T) {
 		}
 	}`)
 	requireToolSchemaSubset(t, listTargets.OutputSchema, expectedListTargetsOutput)
+
+	expectedOAuthAudienceInput := json.RawMessage(`{
+		"type": "object",
+		"title": "Get OAuth target audience",
+		"description": "Resolve the exact upstream URL for an allowlisted OAuth token endpoint.",
+		"properties": {
+			"label": {
+				"type": "string",
+				"description": "OAuth token-endpoint target label.",
+				"pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+				"minLength": 1,
+				"maxLength": 64
+			}
+		}
+	}`)
+	requireToolSchemaSubset(t, oauthAudience.InputSchema, expectedOAuthAudienceInput)
+
+	expectedOAuthAudienceOutput := json.RawMessage(`{
+		"type": "object",
+		"title": "OAuth target audience",
+		"description": "Exact private_key_jwt audience for an allowlisted OAuth token endpoint.",
+		"properties": {
+			"audience": {
+				"type": "string",
+				"description": "Exact upstream OAuth token endpoint URL to use as a private_key_jwt audience.",
+				"format": "uri"
+			}
+		}
+	}`)
+	requireToolSchemaSubset(t, oauthAudience.OutputSchema, expectedOAuthAudienceOutput)
 }
 
 func setupHarpoon(t *testing.T, cfg config.HarpoonConfig) (*Server, *mcp.InMemoryTransport) {

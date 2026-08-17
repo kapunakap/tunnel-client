@@ -273,6 +273,11 @@ the standard MCP OAuth flow while keeping the MCP server private:
   Their POST requests and responses traverse Tunnel and Harpoon; public
   `http(s)` endpoint URLs remain unchanged and are called by the product OAuth
   caller rather than through Tunnel.
+- A caller that needs to sign `private_key_jwt` for a shimmed token endpoint
+  can explicitly GET the shim token URL first. Tunnel service asks a
+  supporting tunnel client for the exact upstream token endpoint audience and
+  returns only that value; older clients keep the existing POST proxy behavior
+  and fail this optional lookup closed.
 - The OAuth shim does not rewrite `authorization_endpoint`; the supported
   auto-registered path leaves browser authorization direct to the upstream
   authorization server. Tunnel does not expose arbitrary authorization-server

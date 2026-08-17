@@ -79,8 +79,10 @@ var (
 		"x-real-ip":                         {},
 		"x-tunnel-traffic-source":           {},
 	}
-	listTargetsSchema       = buildListTargetsInputSchema()
-	listTargetsOutputSchema = buildListTargetsOutputSchema()
+	listTargetsSchema               = buildListTargetsInputSchema()
+	listTargetsOutputSchema         = buildListTargetsOutputSchema()
+	oauthTargetAudienceSchema       = buildOAuthTargetAudienceInputSchema()
+	oauthTargetAudienceOutputSchema = buildOAuthTargetAudienceOutputSchema()
 )
 
 // Server provides MCP tools for constrained HTTP access.
@@ -131,6 +133,14 @@ type targetInfo struct {
 	Source         string   `json:"source,omitempty" jsonschema:"description=Target source."`
 	Tags           []string `json:"tags,omitempty" jsonschema:"description=Target tags."`
 	AllowedMethods []string `json:"allowed_methods" jsonschema:"description=HTTP methods permitted for this target,enum=GET,enum=POST,enum=PUT"`
+}
+
+type oauthTargetAudienceRequest struct {
+	Label string `json:"label" jsonschema:"minLength=1,maxLength=64,pattern=^[a-z0-9][a-z0-9_-]{0\\,63}$,description=OAuth token-endpoint target label."`
+}
+
+type oauthTargetAudienceResponse struct {
+	Audience string `json:"audience" jsonschema:"format=uri,description=Exact upstream OAuth token endpoint URL to use as a private_key_jwt audience."`
 }
 
 func (callTargetRequest) JSONSchemaExtend(schema *jsonschema.Schema) {
@@ -199,6 +209,22 @@ func (listTargetsRequest) JSONSchemaExtend(schema *jsonschema.Schema) {
 	schema.Description = "List available allowlisted targets."
 }
 
+func (oauthTargetAudienceRequest) JSONSchemaExtend(schema *jsonschema.Schema) {
+	if schema == nil {
+		return
+	}
+	schema.Title = "Get OAuth target audience"
+	schema.Description = "Resolve the exact upstream URL for an allowlisted OAuth token endpoint."
+}
+
+func (oauthTargetAudienceResponse) JSONSchemaExtend(schema *jsonschema.Schema) {
+	if schema == nil {
+		return
+	}
+	schema.Title = "OAuth target audience"
+	schema.Description = "Exact private_key_jwt audience for an allowlisted OAuth token endpoint."
+}
+
 // NewServer constructs a harpoon MCP server.
 func NewServer(cfg *config.HarpoonConfig, registry *Registry, buffer *CallBuffer, logger *slog.Logger, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
@@ -234,7 +260,7 @@ func NewServer(cfg *config.HarpoonConfig, registry *Registry, buffer *CallBuffer
 // MCPServer builds an MCP server with harpoon tools registered.
 func (s *Server) MCPServer() *mcp.Server {
 	serverOptions := &mcp.ServerOptions{
-		Instructions: "Harpoon provides a constrained outbound HTTP client. Use list_targets to see allowlisted targets and call_target to make GET/POST/PUT requests with strict size, timeout, and redirect limits. Harpoon cannot reach arbitrary hosts or paths outside the configured allowlist.",
+		Instructions: "Harpoon provides a constrained outbound HTTP client. Use list_targets to see allowlisted targets and call_target to make GET/POST/PUT requests with strict size, timeout, and redirect limits. get_oauth_target_audience is a narrow opt-in lookup for OAuth token-endpoint private_key_jwt audiences. Harpoon cannot reach arbitrary hosts or paths outside the configured allowlist.",
 		Capabilities: &mcp.ServerCapabilities{
 			Tools: &mcp.ToolCapabilities{ListChanged: false},
 		},
@@ -259,6 +285,18 @@ func (s *Server) MCPServer() *mcp.Server {
 		OutputSchema: listTargetsOutputSchema,
 	}, s.listTargetsHandler())
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_oauth_target_audience",
+		Title:       "Get OAuth target audience",
+		Description: "Resolve the exact private_key_jwt audience for an OAuth token endpoint target.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:   true,
+			IdempotentHint: true,
+			OpenWorldHint:  &openWorldFalse,
+		},
+		InputSchema:  oauthTargetAudienceSchema,
+		OutputSchema: oauthTargetAudienceOutputSchema,
+	}, s.oauthTargetAudienceHandler())
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "call_target",
 		Title:       "Call Harpoon target",
 		Description: "Call an allowlisted HTTP target by label.",
@@ -282,6 +320,28 @@ func (s *Server) listTargetsHandler() mcp.ToolHandlerFor[map[string]any, any] {
 		payload, err := json.Marshal(resp)
 		if err != nil {
 			return toolErrorResult("", "failed to encode response"), nil, nil
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}}}, structured, nil
+	}
+}
+
+func (s *Server) oauthTargetAudienceHandler() mcp.ToolHandlerFor[map[string]any, any] {
+	return func(_ context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+		var params oauthTargetAudienceRequest
+		if err := decodeArguments(args, &params); err != nil {
+			return toolErrorResult("", "invalid parameters"), nil, nil
+		}
+		resp, err := s.getOAuthTargetAudience(params)
+		if err != nil {
+			if toolErr := asToolError(err); toolErr != nil {
+				return toolErrorResult(toolErr.label, toolErr.msg), nil, nil
+			}
+			return toolErrorResult(params.Label, "failed to resolve audience"), nil, nil
+		}
+		structured := map[string]any{"audience": resp.Audience}
+		payload, err := json.Marshal(resp)
+		if err != nil {
+			return toolErrorResult(params.Label, "failed to encode response"), nil, nil
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}}}, structured, nil
 	}
@@ -334,6 +394,34 @@ func (s *Server) listTargets(params listTargetsRequest) listTargetsResponse {
 		})
 	}
 	return listTargetsResponse{Targets: out}
+}
+
+func (s *Server) getOAuthTargetAudience(params oauthTargetAudienceRequest) (*oauthTargetAudienceResponse, error) {
+	label := strings.TrimSpace(params.Label)
+	if label == "" {
+		return nil, newToolError(label, "label is required")
+	}
+	target, ok := s.registry.Lookup(label)
+	if !ok {
+		return nil, newToolError(label, "unknown target")
+	}
+	if normalizeToken(target.Category) != "oauth" ||
+		!hasAllTags(target.Tags, []string{"auth-server-metadata", "token-endpoint"}) {
+		return nil, newToolError(label, "target is not an OAuth token endpoint")
+	}
+	audienceURL := target.originalURL
+	if audienceURL == nil {
+		audienceURL = target.BaseURL
+	}
+	if audienceURL == nil {
+		return nil, newToolError(label, "target has no URL")
+	}
+	audienceScheme := strings.ToLower(audienceURL.Scheme)
+	if (audienceScheme != "http" && audienceScheme != "https") ||
+		audienceURL.Host == "" || audienceURL.User != nil || audienceURL.Fragment != "" {
+		return nil, newToolError(label, "target URL cannot be used as an OAuth audience")
+	}
+	return &oauthTargetAudienceResponse{Audience: audienceURL.String()}, nil
 }
 
 func (s *Server) callTarget(ctx context.Context, params callTargetRequest) (*callTargetResponse, error) {
@@ -878,6 +966,24 @@ func buildListTargetsOutputSchema() *jsonschema.Schema {
 func buildListTargetsInputSchema() *jsonschema.Schema {
 	reflector := &jsonschema.Reflector{DoNotReference: true}
 	schema := reflector.Reflect(listTargetsRequest{})
+	if schema.Type == "" {
+		schema.Type = "object"
+	}
+	return schema
+}
+
+func buildOAuthTargetAudienceInputSchema() *jsonschema.Schema {
+	reflector := &jsonschema.Reflector{DoNotReference: true}
+	schema := reflector.Reflect(oauthTargetAudienceRequest{})
+	if schema.Type == "" {
+		schema.Type = "object"
+	}
+	return schema
+}
+
+func buildOAuthTargetAudienceOutputSchema() *jsonschema.Schema {
+	reflector := &jsonschema.Reflector{DoNotReference: true}
+	schema := reflector.Reflect(oauthTargetAudienceResponse{})
 	if schema.Type == "" {
 		schema.Type = "object"
 	}

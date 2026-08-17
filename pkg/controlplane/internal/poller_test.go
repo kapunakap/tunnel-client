@@ -106,11 +106,9 @@ func TestPollerWritesAtMostQueueCapacity(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 
 	received := make([]controlplane.PolledCommand, 0, 3)
 
@@ -246,11 +244,9 @@ func TestPollerRecordsInvalidCommandTypeDrops(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 
 	select {
 	case <-time.After(time.Second):
@@ -333,11 +329,9 @@ func TestPollerRecordsContextCanceledQueueDrops(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 
 	wg.Wait()
 
@@ -368,11 +362,9 @@ func TestPollerTagsPollErrors(t *testing.T) {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 
 	fetcher.waitForPoll(t)
 	cancel()
@@ -421,11 +413,9 @@ func TestPollerDoesNotDropCommandsWhenFetcherExceedsLimit(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 
 	// Drain slowly to force backpressure on the second/third enqueue while ensuring
 	// all commands are eventually observed.
@@ -902,11 +892,9 @@ func TestPollerLogsRecoveryAfterError(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 	wg.Wait()
 
 	if !strings.Contains(output.String(), "poller recovered; polling operational") {
@@ -947,11 +935,9 @@ func TestPollerLogsAPIStatusErrorDetails(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 	wg.Wait()
 
 	logs := output.String()
@@ -988,11 +974,9 @@ func TestPollerPollsWithGuardrailedTimeoutAndRetries(t *testing.T) {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		runner.Run(ctx)
-	}()
+	})
 
 	fetcher.waitForCalls(t, 2)
 	cancel()
@@ -1034,11 +1018,9 @@ func TestPollerRetriesOnCanceledErrorWithoutStop(t *testing.T) {
 	defer cancel()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 
 	fetcher.waitForPoll(t)
 	select {
@@ -1077,11 +1059,9 @@ func TestPollerStopsWithoutBackoffOnCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		poller.Run(ctx)
-	}()
+	})
 
 	select {
 	case <-fetcher.pollStarted:

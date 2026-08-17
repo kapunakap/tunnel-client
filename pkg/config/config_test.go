@@ -2093,6 +2093,27 @@ func TestLoadPollChannelsPrecedenceAndHarpoonOnly(t *testing.T) {
 	}
 }
 
+func TestLoadHarpoonOnlyPollChannelsRetainDisabledMainBinding(t *testing.T) {
+	cfg, err := Load([]string{
+		"--control-plane.tunnel-id", flagTunnelID,
+		"--control-plane.poll-channel", "harpoon",
+		"--mcp.server-url", "https://disabled-mcp.example",
+		"--harpoon.target", "label=auth,url=https://example.com",
+	}, lookupEnvMap(map[string]string{"OPENAI_API_KEY": "key"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.MCP.AllowNoMain {
+		t.Fatal("expected main subscription to be disabled")
+	}
+	if cfg.MCP.MainChannelBinding() == nil {
+		t.Fatal("expected disabled main binding to remain configured")
+	}
+	if cfg.MCP.ServerURL == nil || cfg.MCP.ServerURL.String() != "https://disabled-mcp.example" {
+		t.Fatalf("unexpected legacy main server URL: %v", cfg.MCP.ServerURL)
+	}
+}
+
 func TestLoadPollChannelsEnvSorted(t *testing.T) {
 	cfg, err := Load([]string{"--control-plane.tunnel-id", flagTunnelID, "--mcp.server-url", "https://mcp.example", "--harpoon.target", "label=auth,url=https://example.com"}, lookupEnvMap(map[string]string{
 		"OPENAI_API_KEY":              "key",

@@ -750,6 +750,7 @@ func (p *mcpProcessor) processOauthDiscoveryCommand(ctx context.Context, logger 
 			oauth.URLBundleOptions{
 				UnixSocketPath: p.mcpUnixSocketPath,
 				UnixSocketURL:  p.mcpServerURL,
+				TrustedMCPURL:  p.mcpServerURL,
 			},
 			logger,
 		)

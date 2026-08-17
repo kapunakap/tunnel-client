@@ -21,6 +21,11 @@ type URLRecord struct {
 	Description    string
 	Tags           []Tag
 	UnixSocketPath string
+
+	// DisallowPrivateHostRegistration prevents this record from being admitted
+	// as a private-host target or seeding OAuth protected-resource host policy.
+	// An exact trusted protected-resource origin may still admit the record.
+	DisallowPrivateHostRegistration bool
 }
 
 // TagKey identifies a URL tag category.

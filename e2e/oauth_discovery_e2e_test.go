@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -474,4 +475,415 @@ func TestOAuthDiscoveryRegistersCustomerHostRegistrationEndpointE2E(t *testing.T
 	)
 
 	h.ExecuteScenarious(t)
+}
+
+func TestOAuthDiscoveryRejectsOffOriginPrivateMetadataEndpointsE2E(t *testing.T) {
+	testCases := []struct {
+		name                 string
+		issuerMismatch       bool
+		poisonResourceAnchor bool
+		poisonedLabels       []string
+	}{
+		{
+			name:           "exact_issuer",
+			poisonedLabels: []string{"oauth-token-endpoint-0"},
+		},
+		{
+			name:           "issuer_mismatch",
+			issuerMismatch: true,
+			poisonedLabels: []string{"oauth-issuer-0", "oauth-token-endpoint-0"},
+		},
+		{
+			name:                 "private_prmd_resource_anchor",
+			poisonResourceAnchor: true,
+			poisonedLabels:       []string{"oauth-prmd-resource-0", "oauth-token-endpoint-0"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			const customerHost = "location-mcp.internal.preproduction.smp.bigco-example.com"
+			customerBase := "http://" + customerHost
+			targetsReady := make(chan struct{})
+			privateCalls := make(chan string, 1)
+
+			privateTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case privateCalls <- r.Method + " " + r.URL.Path:
+				default:
+				}
+				_, _ = w.Write([]byte("customer-internal-secret"))
+			}))
+			t.Cleanup(privateTarget.Close)
+
+			metadataIssuer := customerBase
+			if testCase.issuerMismatch {
+				metadataIssuer = privateTarget.URL + "/issuer"
+			}
+			resourceURL := customerBase + "/mcp"
+			if testCase.poisonResourceAnchor {
+				resourceURL = privateTarget.URL + "/mcp"
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource":
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"resource":              resourceURL,
+						"authorization_servers": []string{customerBase},
+						"scopes_supported":      []string{"mcp:tools"},
+					})
+				case "/.well-known/oauth-authorization-server":
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"issuer":                metadataIssuer,
+						"token_endpoint":        privateTarget.URL + "/admin/config",
+						"registration_endpoint": customerBase + "/register",
+						"revocation_endpoint":   customerBase + "/revoke",
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(upstream.Close)
+
+			proxy := mockproxy.New(mockproxy.WithRoute(customerHost, mustParseURL(t, upstream.URL)))
+			proxy.Start()
+			t.Cleanup(proxy.Close)
+
+			discoveryID := "cmd-oauth-off-origin-" + testCase.name
+			harpoonInitID := "cmd-harpoon-init-off-origin-" + testCase.name
+			harpoonReadyID := "cmd-harpoon-ready-off-origin-" + testCase.name
+			harpoonListID := "cmd-harpoon-list-off-origin-" + testCase.name
+			harpoonCallID := "cmd-harpoon-call-off-origin-" + testCase.name
+
+			assertResponse := func(expectedType string, expectedCode int) func(testing.TB, mocktunnelservice.ReceivedResponse) {
+				return func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+					target := oauthDiscoveryE2ETarget(t, tb)
+					if resp.ResponseType != expectedType {
+						target.Fatalf("response type mismatch: got %q want %q", resp.ResponseType, expectedType)
+					}
+					if resp.ResponseCode != expectedCode {
+						target.Fatalf("response code mismatch: got %d want %d", resp.ResponseCode, expectedCode)
+					}
+				}
+			}
+
+			oauthCommand := mocktunnelservice.CommandResponse{
+				Command: mocktunnelservice.NewOAuthDiscoveryCommand(discoveryID, nil),
+				ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+					RequestID: discoveryID,
+					Assert:    assertResponse(string(wiretypes.ResponsePayloadOAuth), http.StatusOK),
+				}},
+			}
+			harpoonInitialize := mocktunnelservice.CommandResponse{
+				Command: newChannelCommand(
+					harpoonInitID,
+					types.ChannelHarpoon.String(),
+					json.RawMessage(`{
+						"jsonrpc":"2.0",
+						"id":"initialize-harpoon-off-origin",
+						"method":"initialize",
+						"params":{
+							"protocolVersion":"2025-06-18",
+							"capabilities":{},
+							"clientInfo":{"name":"harpoon-e2e","version":"0.0.1"}
+						}
+					}`),
+					http.Header{
+						"Accept":       []string{"application/json, text/event-stream"},
+						"Content-Type": []string{"application/json"},
+					},
+				),
+				ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+					RequestID: harpoonInitID,
+					Assert:    assertResponse(string(wiretypes.ResponsePayloadJSONRPC), http.StatusOK),
+				}},
+			}
+			harpoonInitialized := mocktunnelservice.CommandResponse{
+				Command: newChannelCommand(
+					harpoonReadyID,
+					types.ChannelHarpoon.String(),
+					json.RawMessage(`{
+						"jsonrpc":"2.0",
+						"method":"notifications/initialized",
+						"params":{}
+					}`),
+					http.Header{
+						"Accept":       []string{"application/json"},
+						"Content-Type": []string{"application/json"},
+					},
+				),
+				ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+					RequestID: harpoonReadyID,
+					Assert:    assertResponse(string(wiretypes.ResponsePayloadNotifyAck), http.StatusOK),
+				}},
+			}
+			harpoonListTargets := mocktunnelservice.CommandResponse{
+				Command: newChannelCommand(
+					harpoonListID,
+					types.ChannelHarpoon.String(),
+					json.RawMessage(`{
+						"jsonrpc":"2.0",
+						"id":"list-targets-off-origin",
+						"method":"tools/call",
+						"params":{
+							"name":"list_targets",
+							"arguments":{}
+						}
+					}`),
+					http.Header{
+						"Accept":       []string{"application/json"},
+						"Content-Type": []string{"application/json"},
+					},
+				),
+				DeliverAfter: targetsReady,
+				ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+					RequestID: harpoonListID,
+					Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+						target := oauthDiscoveryE2ETarget(t, tb)
+						if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) {
+							target.Fatalf("harpoon list_targets response type mismatch: got %q", resp.ResponseType)
+						}
+						if resp.ResponseCode != http.StatusOK {
+							target.Fatalf("harpoon list_targets response code mismatch: %d", resp.ResponseCode)
+						}
+						var payload struct {
+							Result struct {
+								StructuredContent struct {
+									Targets []struct {
+										Label string `json:"label"`
+									} `json:"targets"`
+								} `json:"structuredContent"`
+							} `json:"result"`
+							Error json.RawMessage `json:"error"`
+						}
+						if err := json.Unmarshal(resp.JSONResponse, &payload); err != nil {
+							target.Fatalf("decode harpoon list_targets response: %v", err)
+						}
+						if len(payload.Error) != 0 {
+							target.Fatalf("harpoon list_targets returned JSON-RPC error: %s", payload.Error)
+						}
+						labels := make(map[string]bool, len(payload.Result.StructuredContent.Targets))
+						for _, entry := range payload.Result.StructuredContent.Targets {
+							labels[entry.Label] = true
+						}
+						for _, expected := range []string{"oauth-auth-server-metadata-0", "oauth-registration-endpoint-0"} {
+							if !labels[expected] {
+								target.Fatalf("harpoon list_targets missing compatibility target %q", expected)
+							}
+						}
+						for _, poisonedLabel := range testCase.poisonedLabels {
+							if labels[poisonedLabel] {
+								target.Errorf("harpoon list_targets exposed off-origin private target %q", poisonedLabel)
+							}
+						}
+					},
+				}},
+			}
+			harpoonCallPoisonedTarget := mocktunnelservice.CommandResponse{
+				Command: newChannelCommand(
+					harpoonCallID,
+					types.ChannelHarpoon.String(),
+					json.RawMessage(`{
+						"jsonrpc":"2.0",
+						"id":"call-poisoned-target",
+						"method":"tools/call",
+						"params":{
+							"name":"call_target",
+							"arguments":{
+								"label":"oauth-token-endpoint-0",
+								"method":"POST",
+								"body":"grant_type=authorization_code"
+							}
+						}
+					}`),
+					http.Header{
+						"Accept":       []string{"application/json"},
+						"Content-Type": []string{"application/json"},
+					},
+				),
+				ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+					RequestID: harpoonCallID,
+					Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+						target := oauthDiscoveryE2ETarget(t, tb)
+						if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) {
+							target.Fatalf("harpoon call response type mismatch: got %q", resp.ResponseType)
+						}
+						if resp.ResponseCode != http.StatusOK {
+							target.Fatalf("harpoon call response code mismatch: %d", resp.ResponseCode)
+						}
+						var payload struct {
+							Result struct {
+								IsError bool `json:"isError"`
+								Content []struct {
+									Text string `json:"text"`
+								} `json:"content"`
+							} `json:"result"`
+							Error json.RawMessage `json:"error"`
+						}
+						if err := json.Unmarshal(resp.JSONResponse, &payload); err != nil {
+							target.Fatalf("decode harpoon call response: %v", err)
+						}
+						if len(payload.Error) != 0 {
+							target.Fatalf("harpoon call returned JSON-RPC error: %s", payload.Error)
+						}
+						if !payload.Result.IsError {
+							target.Errorf("off-origin private token endpoint remained callable")
+							return
+						}
+						var textParts []string
+						for _, content := range payload.Result.Content {
+							textParts = append(textParts, content.Text)
+						}
+						if !strings.Contains(strings.Join(textParts, "\n"), "unknown target") {
+							target.Errorf("unexpected rejection for off-origin private target: %v", textParts)
+						}
+					},
+				}},
+			}
+
+			h := harnesspkg.NewHarness(
+				t,
+				harnesspkg.WithPreserveClientURLs(),
+				harnesspkg.WithClientConfig(func(cfg *config.Config) {
+					cfg.Logging.Level = slog.LevelDebug
+					cfg.MCP.TransportKind = config.MCPTransportHTTPStreamable
+					cfg.MCP.ServerURL = mustParseURL(t, customerBase+"/mcp")
+					cfg.MCP.HTTPProxy = mustParseURL(t, proxy.URL())
+					cfg.MCP.HTTPProxySource = config.ProxySource("mcp.http-proxy")
+					cfg.MCP.ChannelBindings = []config.MCPChannelBinding{{
+						Channel:         types.DefaultChannel,
+						TransportKind:   config.MCPTransportHTTPStreamable,
+						ServerURL:       cfg.MCP.ServerURL,
+						HTTPProxy:       cfg.MCP.HTTPProxy,
+						HTTPProxySource: cfg.MCP.HTTPProxySource,
+					}}
+					cfg.Harpoon.AllowPlaintextHTTP = true
+					cfg.Harpoon.MaxResponseBytes = config.DefaultHarpoonMaxResponseBytes
+					cfg.Harpoon.MaxRedirects = config.DefaultHarpoonMaxRedirects
+					cfg.Harpoon.HostClassifier.IncludeLoopback = true
+					cfg.Harpoon.Targets = []config.HarpoonTarget{{
+						Label:       "seed",
+						Description: "seed target for routable harpoon channel",
+						BaseURL:     mustParseURL(t, upstream.URL),
+					}}
+				}),
+				harnesspkg.WithControlPlaneOptions(
+					mocktunnelservice.WithCommandResponses(
+						oauthCommand,
+						harpoonInitialize,
+						harpoonInitialized,
+						harpoonListTargets,
+						harpoonCallPoisonedTarget,
+					),
+				),
+				harnesspkg.WithAfterClientStart(func(h *harnesspkg.Harness) {
+					t.Helper()
+					if h.HarpoonRegistry == nil {
+						t.Fatal("harpoon registry not populated")
+					}
+					go func() {
+						defer close(targetsReady)
+						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+						// Registration follows token-endpoint in the published bundle, so
+						// waiting for it avoids racing list_targets against auto-registration.
+						for _, label := range []string{
+							"oauth-auth-server-metadata-0",
+							"oauth-registration-endpoint-0",
+						} {
+							if _, err := h.HarpoonRegistry.WaitForTarget(ctx, label); err != nil {
+								t.Errorf("wait for harpoon target %q: %v", label, err)
+								return
+							}
+						}
+					}()
+				}),
+			)
+
+			h.ExecuteScenarious(t)
+
+			select {
+			case call := <-privateCalls:
+				t.Errorf("off-origin private endpoint was called: %s", call)
+			default:
+			}
+		})
+	}
+}
+
+func TestHarpoonOnlyDisabledMainDoesNotBootstrapOAuthE2E(t *testing.T) {
+	requestSeen := make(chan struct{}, 1)
+	disabledMain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requestSeen <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resource":"http://127.0.0.1/private"}`))
+	}))
+	t.Cleanup(disabledMain.Close)
+
+	h := harnesspkg.NewHarness(
+		t,
+		harnesspkg.WithPreserveClientURLs(),
+		harnesspkg.WithClientConfig(func(cfg *config.Config) {
+			cfg.Logging.Level = slog.LevelDebug
+			cfg.ControlPlane.PollChannelsConfigured = true
+			cfg.ControlPlane.PollChannels = []types.Channel{types.ChannelHarpoon}
+			cfg.MCP.AllowNoMain = true
+			cfg.MCP.TransportKind = config.MCPTransportHTTPStreamable
+			cfg.MCP.ServerURL = mustParseURL(t, disabledMain.URL+"/mcp")
+			cfg.MCP.ChannelBindings = []config.MCPChannelBinding{{
+				Channel:       types.DefaultChannel,
+				TransportKind: config.MCPTransportHTTPStreamable,
+				ServerURL:     cfg.MCP.ServerURL,
+			}}
+			cfg.Harpoon.AllowPlaintextHTTP = true
+			cfg.Harpoon.Targets = []config.HarpoonTarget{{
+				Label:       "seed",
+				Description: "seed target for routable harpoon channel",
+				BaseURL:     mustParseURL(t, disabledMain.URL+"/seed"),
+			}}
+		}),
+		harnesspkg.WithAfterClientStart(func(h *harnesspkg.Harness) {
+			if h.OAuthState == nil {
+				t.Fatal("OAuth discovery state not populated")
+			}
+			_, _, _, err, done := h.OAuthState.Wait(time.Second)
+			if !done {
+				t.Fatal("OAuth discovery did not settle")
+			}
+			if err != nil {
+				t.Fatalf("disabled OAuth discovery returned error: %v", err)
+			}
+			select {
+			case <-requestSeen:
+				t.Fatal("disabled main MCP endpoint received an OAuth discovery request")
+			default:
+			}
+			if h.HarpoonRegistry == nil {
+				t.Fatal("harpoon registry not populated")
+			}
+			if _, ok := h.HarpoonRegistry.Lookup("seed"); !ok {
+				t.Fatal("configured Harpoon seed target was not registered")
+			}
+			if _, ok := h.HarpoonRegistry.Lookup("oauth-prmd-resource-0"); ok {
+				t.Fatal("disabled main registered a dynamic OAuth target")
+			}
+		}),
+	)
+
+	h.ExecuteScenarious(t)
+}
+
+func oauthDiscoveryE2ETarget(t *testing.T, tb testing.TB) testing.TB {
+	if tb != nil {
+		tb.Helper()
+		return tb
+	}
+	t.Helper()
+	return t
 }

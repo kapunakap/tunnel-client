@@ -151,6 +151,130 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadata(t *testing.T) {
 		if record.UnixSocketPath != "" {
 			t.Fatalf("expected HTTP-discovered record %q to keep empty unix socket path, got %q", tagValueForTest(record.Tags, hostbus.TagKeyRole), record.UnixSocketPath)
 		}
+		if record.DisallowPrivateHostRegistration {
+			t.Fatalf("expected same-origin record %q to remain private-host eligible", tagValueForTest(record.Tags, hostbus.TagKeyRole))
+		}
+	}
+}
+
+func TestAppendAuthServerMetadataRecordUsesCanonicalOrigin(t *testing.T) {
+	tests := []struct {
+		name     string
+		issuer   string
+		record   string
+		disallow bool
+	}{
+		{
+			name:     "normalized host and default HTTPS port",
+			issuer:   "https://Auth.Example.COM./issuer",
+			record:   "https://auth.example.com:443/token",
+			disallow: false,
+		},
+		{
+			name:     "normalized explicit port",
+			issuer:   "https://auth.example.com:08443/issuer",
+			record:   "https://AUTH.EXAMPLE.COM.:8443/token",
+			disallow: false,
+		},
+		{
+			name:     "canonical IPv6 host",
+			issuer:   "https://[::1]/issuer",
+			record:   "https://[0:0:0:0:0:0:0:1]:443/token",
+			disallow: false,
+		},
+		{
+			name:     "different port",
+			issuer:   "https://auth.example.com/issuer",
+			record:   "https://auth.example.com:8443/token",
+			disallow: true,
+		},
+		{
+			name:     "different scheme",
+			issuer:   "https://auth.example.com/issuer",
+			record:   "http://auth.example.com/token",
+			disallow: true,
+		},
+		{
+			name:     "different host",
+			issuer:   "https://auth.example.com/issuer",
+			record:   "https://127.0.0.1/token",
+			disallow: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			records := appendAuthServerMetadataRecord(
+				nil,
+				tc.record,
+				"Auth server token endpoint",
+				"token-endpoint",
+				0,
+				"bundle",
+				mustParseURL(t, tc.issuer),
+				true,
+				URLBundleOptions{},
+			)
+			if len(records) != 1 {
+				t.Fatalf("expected one record, got %d", len(records))
+			}
+			if got := records[0].DisallowPrivateHostRegistration; got != tc.disallow {
+				t.Fatalf("unexpected private-host registration policy: got %t want %t", got, tc.disallow)
+			}
+		})
+	}
+}
+
+func TestBuildURLBundleUsesTrustedMCPOriginForPrivateRegistration(t *testing.T) {
+	const (
+		trustedMCPURL = "https://mcp.example/mcp"
+		privateOrigin = "https://10.0.0.1"
+		sourceURL     = privateOrigin + "/.well-known/oauth-protected-resource"
+		authServerURL = privateOrigin + "/oauth"
+	)
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(bytes.NewBufferString(
+				"{\"issuer\":\"" + authServerURL + "\",\"token_endpoint\":\"" + privateOrigin + "/token\"}",
+			)),
+			Request: req,
+		}, nil
+	})}
+
+	bundle, _, err := buildURLBundleFromPRMDWithAuthServerMetadata(
+		context.Background(),
+		client,
+		[]byte("{\"resource\":\""+privateOrigin+"/mcp\",\"authorization_servers\":[\""+authServerURL+"\"]}"),
+		time.Unix(42, 0).UTC(),
+		mustParseURL(t, sourceURL),
+		URLBundleOptions{TrustedMCPURL: mustParseURL(t, trustedMCPURL)},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatalf("build bundle: %v", err)
+	}
+
+	recordsByRole := make(map[string]hostbus.URLRecord, len(bundle.URLs))
+	for _, record := range bundle.URLs {
+		recordsByRole[tagValueForTest(record.Tags, hostbus.TagKeyRole)] = record
+	}
+	for _, role := range []string{
+		"prmd-source",
+		"prmd-resource",
+		"prmd-auth-server",
+		"auth-server-metadata",
+		"issuer",
+		"token-endpoint",
+	} {
+		record, ok := recordsByRole[role]
+		if !ok {
+			t.Fatalf("missing %q record", role)
+		}
+		if !record.DisallowPrivateHostRegistration {
+			t.Fatalf("expected off-origin %q record to disallow private-host registration", role)
+		}
 	}
 }
 
@@ -453,12 +577,15 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataAcceptsIssuerMismatch(t *te
 	}
 
 	urlByRole := map[string]string{}
+	recordByRole := map[string]hostbus.URLRecord{}
 	for _, record := range bundle.URLs {
 		if record.URL == nil {
 			t.Fatalf("expected URL for role %q", tagValueForTest(record.Tags, hostbus.TagKeyRole))
 			return
 		}
-		urlByRole[tagValueForTest(record.Tags, hostbus.TagKeyRole)] = record.URL.String()
+		role := tagValueForTest(record.Tags, hostbus.TagKeyRole)
+		urlByRole[role] = record.URL.String()
+		recordByRole[role] = record
 	}
 	if got := urlByRole["auth-server-metadata"]; got != server.URL+"/.well-known/oauth-authorization-server/issuer-a" {
 		t.Fatalf("unexpected auth-server-metadata url: got %q", got)
@@ -480,6 +607,21 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataAcceptsIssuerMismatch(t *te
 	}
 	if got := urlByRole["revocation-endpoint"]; got != externalIssuer+"/revoke" {
 		t.Fatalf("unexpected revocation endpoint: got %q", got)
+	}
+	if recordByRole["auth-server-metadata"].DisallowPrivateHostRegistration {
+		t.Fatalf("expected advertised auth-server metadata URL to remain private-host eligible")
+	}
+	for _, role := range []string{
+		"issuer",
+		"token-endpoint",
+		"jwks-uri",
+		"introspection-endpoint",
+		"registration-endpoint",
+		"revocation-endpoint",
+	} {
+		if !recordByRole[role].DisallowPrivateHostRegistration {
+			t.Fatalf("expected off-origin %q record to disallow classifier-only private registration", role)
+		}
 	}
 
 	if result.SelectedURL != server.URL+"/.well-known/oauth-authorization-server/issuer-a" {

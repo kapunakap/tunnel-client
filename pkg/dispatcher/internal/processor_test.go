@@ -3408,6 +3408,89 @@ func TestProcessorOAuthDiscoveryPublishesHostBundle(t *testing.T) {
 	)
 }
 
+func TestProcessorOAuthDiscoveryDisallowsOffOriginPrivateHostBundleRecords(t *testing.T) {
+	t.Parallel()
+
+	offOriginMux := http.NewServeMux()
+	offOrigin := httptest.NewServer(offOriginMux)
+	t.Cleanup(offOrigin.Close)
+	offOriginIssuer := offOrigin.URL + "/issuer"
+	offOriginMux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"resource":              offOrigin.URL + "/mcp",
+			"authorization_servers": []string{offOriginIssuer},
+		}))
+	})
+	offOriginMux.HandleFunc("/issuer/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"issuer":         offOriginIssuer,
+			"token_endpoint": offOrigin.URL + "/token",
+		}))
+	})
+
+	configuredMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+offOrigin.URL+`/.well-known/oauth-protected-resource"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(configuredMCP.Close)
+	configuredMCPURL, err := url.Parse(configuredMCP.URL + "/mcp")
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	responder := newRecordingResponder()
+	transport := &stubForwardingTransport{conn: &stubForwardingConnection{}}
+	hostBus := newRecordingHostBus()
+	processor, err := NewProcessor(processorParams{
+		Logger:          logger,
+		ChannelBindings: newTestChannelBindings(transport),
+		TunnelResponder: responder,
+		MCPConfig: &config.MCPConfig{
+			ServerURL:             configuredMCPURL,
+			ConnectionMaxTTL:      2 * time.Second,
+			MaxConcurrentRequests: 1,
+		},
+		OAuthHTTPClient: &http.Client{},
+		HostBus:         hostBus,
+		ControlPlaneCfg: newTestControlPlaneConfig(t),
+		MeterProvider:   newTestMeterProvider(t),
+	})
+	require.NoError(t, err)
+
+	cmd := &fakeOauthDiscoveryCommand{
+		id:         types.RequestID("oauth-discovery-off-origin-private"),
+		enqueuedAt: time.Now().Add(-time.Second),
+		polledAt:   time.Now(),
+		headers:    http.Header{},
+		shardToken: "shard-oauth-discovery-off-origin-private",
+	}
+	require.NoError(t, processor.Process(context.Background(), cmd))
+	_ = responder.waitForResponse(t)
+
+	bundle := hostBus.waitForBundle(t)
+	recordsByRole := make(map[string]hostbus.URLRecord, len(bundle.URLs))
+	for _, record := range bundle.URLs {
+		for _, tag := range record.Tags {
+			if tag.Key == hostbus.TagKeyRole {
+				recordsByRole[tag.Value] = record
+			}
+		}
+	}
+	for _, role := range []string{
+		"prmd-source",
+		"prmd-resource",
+		"prmd-auth-server",
+		"auth-server-metadata",
+		"issuer",
+		"token-endpoint",
+	} {
+		record, ok := recordsByRole[role]
+		require.Truef(t, ok, "expected %q role in host bundle", role)
+		require.Truef(t, record.DisallowPrivateHostRegistration, "expected off-origin private %q record to be ineligible for private-host registration", role)
+	}
+}
+
 func TestProcessorNormalizesZeroStatusCodeForJSONRPCResponses(t *testing.T) {
 	t.Parallel()
 

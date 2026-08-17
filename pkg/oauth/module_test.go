@@ -203,6 +203,72 @@ func TestOAuthDiscoveryPublishesPRMDBundle(t *testing.T) {
 	}
 }
 
+func TestOAuthDiscoveryDisabledWhenMainChannelNotEnabled(t *testing.T) {
+	requestSeen := make(chan struct{})
+	var requestOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestOnce.Do(func() { close(requestSeen) })
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resource":"http://127.0.0.1/secret"}`))
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL + "/mcp")
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	state := NewDiscoveryState()
+	bus := &recordingBus{notify: make(chan struct{})}
+	app := fx.New(
+		fx.Provide(
+			func() *config.MCPConfig {
+				return &config.MCPConfig{
+					AllowNoMain:   true,
+					ServerURL:     serverURL,
+					TransportKind: config.MCPTransportHTTPStreamable,
+				}
+			},
+			fx.Annotate(
+				func() *http.Client { return server.Client() },
+				fx.ResultTags(`name:"mcp_client"`),
+			),
+			func() hostbus.HostRegistrationBus { return bus },
+			func() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) },
+			func() *DiscoveryState { return state },
+		),
+		fx.Invoke(startOAuthDiscovery),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		_ = app.Stop(context.Background())
+	}()
+
+	_, _, _, discoveryErr, done := state.Wait(time.Second)
+	if !done {
+		t.Fatal("OAuth discovery did not settle")
+	}
+	if discoveryErr != nil {
+		t.Fatalf("disabled OAuth discovery returned error: %v", discoveryErr)
+	}
+	select {
+	case <-requestSeen:
+		t.Fatal("disabled main MCP endpoint received an OAuth discovery request")
+	default:
+	}
+
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if len(bus.bundles) != 0 {
+		t.Fatalf("disabled main published %d OAuth bundle(s)", len(bus.bundles))
+	}
+}
+
 func TestOAuthDiscoveryRequiresBus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

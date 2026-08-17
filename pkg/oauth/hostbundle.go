@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,10 +20,12 @@ import (
 	tclog "github.com/openai/tunnel-client/pkg/log"
 )
 
-// URLBundleOptions carries optional generic transport hints for discovered URLs.
+// URLBundleOptions carries optional transport hints and trust context for
+// discovered URLs.
 type URLBundleOptions struct {
 	UnixSocketPath string
 	UnixSocketURL  *url.URL
+	TrustedMCPURL  *url.URL
 }
 
 func (o URLBundleOptions) apply(record hostbus.URLRecord) hostbus.URLRecord {
@@ -55,7 +59,40 @@ func sameURLOrigin(left *url.URL, right *url.URL) bool {
 	if left == nil || right == nil {
 		return false
 	}
-	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		normalizedURLHostname(left) == normalizedURLHostname(right) &&
+		effectiveURLPort(left) == effectiveURLPort(right)
+}
+
+func normalizedURLHostname(raw *url.URL) string {
+	if raw == nil {
+		return ""
+	}
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw.Hostname())), ".")
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.String()
+	}
+	return host
+}
+
+func effectiveURLPort(raw *url.URL) string {
+	if raw == nil {
+		return ""
+	}
+	if port := raw.Port(); port != "" {
+		if parsedPort, err := strconv.Atoi(port); err == nil {
+			return strconv.Itoa(parsedPort)
+		}
+		return port
+	}
+	switch strings.ToLower(raw.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func sameOrChildURLPath(candidate *url.URL, base *url.URL) bool {
@@ -124,10 +161,20 @@ func buildURLBundleFromPRMDWithAuthServerMetadata(
 
 	records := make([]hostbus.URLRecord, 0, 10)
 	bundleGroupID := oauthBundleGroupID(metadata.Resource, metadata.AuthorizationServers, sourceURL)
-	records = append(records, options.apply(urlRecordFromPRMDResource(metadata.Resource, 0)))
+	trustedOrigin := sourceURL
+	if options.TrustedMCPURL != nil {
+		trustedOrigin = options.TrustedMCPURL
+	}
+	resourceRecord := options.apply(urlRecordFromPRMDResource(metadata.Resource, 0))
+	resourceRecord = disallowPrivateHostRegistrationOutsideOrigin(resourceRecord, trustedOrigin)
+	records = append(records, resourceRecord)
 
+	allowAuthServerPrivateRegistration := false
 	if len(metadata.AuthorizationServers) > 0 {
-		records = append(records, options.apply(urlRecordFromPRMDAuthServer(metadata.AuthorizationServers[0], 0, bundleGroupID)))
+		authServerRecord := options.apply(urlRecordFromPRMDAuthServer(metadata.AuthorizationServers[0], 0, bundleGroupID))
+		authServerRecord = disallowPrivateHostRegistrationOutsideOrigin(authServerRecord, trustedOrigin)
+		allowAuthServerPrivateRegistration = !authServerRecord.DisallowPrivateHostRegistration
+		records = append(records, authServerRecord)
 		if len(metadata.AuthorizationServers) > 1 && logger != nil {
 			logger.InfoContext(ctx, "oauth PRMD contains multiple authorization servers; only authorization_servers[0] is used",
 				slog.Int("authorization_server_count", len(metadata.AuthorizationServers)),
@@ -135,7 +182,9 @@ func buildURLBundleFromPRMDWithAuthServerMetadata(
 		}
 	}
 	if sourceURL != nil {
-		records = append(records, options.apply(urlRecordFromPRMDSource(sourceURL, 0)))
+		sourceRecord := options.apply(urlRecordFromPRMDSource(sourceURL, 0))
+		sourceRecord = disallowPrivateHostRegistrationOutsideOrigin(sourceRecord, trustedOrigin)
+		records = append(records, sourceRecord)
 	}
 
 	var authServerMetadataFetch *AuthServerMetadataFetchResult
@@ -146,6 +195,7 @@ func buildURLBundleFromPRMDWithAuthServerMetadata(
 			metadata.AuthorizationServers[0],
 			0,
 			bundleGroupID,
+			allowAuthServerPrivateRegistration,
 			options,
 			logger,
 		)
@@ -224,6 +274,13 @@ func urlRecordFromPRMDSource(sourceURL *url.URL, index int) hostbus.URLRecord {
 	}
 }
 
+func disallowPrivateHostRegistrationOutsideOrigin(record hostbus.URLRecord, trustedOrigin *url.URL) hostbus.URLRecord {
+	if record.URL == nil || trustedOrigin == nil || !sameURLOrigin(record.URL, trustedOrigin) {
+		record.DisallowPrivateHostRegistration = true
+	}
+	return record
+}
+
 func defaultPRMDTags(role string, index int) []hostbus.Tag {
 	return []hostbus.Tag{
 		{Key: hostbus.TagKeySource, Value: "oauth"},
@@ -238,6 +295,7 @@ func buildAuthServerMetadataURLRecords(
 	authServerRaw string,
 	authServerIndex int,
 	bundleGroupID string,
+	allowPrivateHostRegistration bool,
 	options URLBundleOptions,
 	logger *slog.Logger,
 ) ([]hostbus.URLRecord, *AuthServerMetadataFetchResult) {
@@ -283,14 +341,15 @@ func buildAuthServerMetadataURLRecords(
 		authServerIndex,
 		bundleGroupID,
 		issuerURL,
+		allowPrivateHostRegistration,
 		options,
 	)
-	records = appendAuthServerMetadataRecord(records, meta.Issuer, "Auth server issuer", "issuer", authServerIndex, bundleGroupID, issuerURL, options)
-	records = appendAuthServerMetadataRecord(records, meta.TokenEndpoint, "Auth server token endpoint", "token-endpoint", authServerIndex, bundleGroupID, issuerURL, options)
-	records = appendAuthServerMetadataRecord(records, meta.JWKSURI, "Auth server JWKS URI", "jwks-uri", authServerIndex, bundleGroupID, issuerURL, options)
-	records = appendAuthServerMetadataRecord(records, meta.IntrospectionEndpoint, "Auth server introspection endpoint", "introspection-endpoint", authServerIndex, bundleGroupID, issuerURL, options)
-	records = appendAuthServerMetadataRecord(records, meta.RegistrationEndpoint, "Auth server registration endpoint", "registration-endpoint", authServerIndex, bundleGroupID, issuerURL, options)
-	records = appendAuthServerMetadataRecord(records, meta.RevocationEndpoint, "Auth server revocation endpoint", "revocation-endpoint", authServerIndex, bundleGroupID, issuerURL, options)
+	records = appendAuthServerMetadataRecord(records, meta.Issuer, "Auth server issuer", "issuer", authServerIndex, bundleGroupID, issuerURL, allowPrivateHostRegistration, options)
+	records = appendAuthServerMetadataRecord(records, meta.TokenEndpoint, "Auth server token endpoint", "token-endpoint", authServerIndex, bundleGroupID, issuerURL, allowPrivateHostRegistration, options)
+	records = appendAuthServerMetadataRecord(records, meta.JWKSURI, "Auth server JWKS URI", "jwks-uri", authServerIndex, bundleGroupID, issuerURL, allowPrivateHostRegistration, options)
+	records = appendAuthServerMetadataRecord(records, meta.IntrospectionEndpoint, "Auth server introspection endpoint", "introspection-endpoint", authServerIndex, bundleGroupID, issuerURL, allowPrivateHostRegistration, options)
+	records = appendAuthServerMetadataRecord(records, meta.RegistrationEndpoint, "Auth server registration endpoint", "registration-endpoint", authServerIndex, bundleGroupID, issuerURL, allowPrivateHostRegistration, options)
+	records = appendAuthServerMetadataRecord(records, meta.RevocationEndpoint, "Auth server revocation endpoint", "revocation-endpoint", authServerIndex, bundleGroupID, issuerURL, allowPrivateHostRegistration, options)
 	return records, fetchResult
 }
 
@@ -315,6 +374,7 @@ func appendAuthServerMetadataRecord(
 	authServerIndex int,
 	bundleGroupID string,
 	issuerURL *url.URL,
+	allowPrivateHostRegistration bool,
 	options URLBundleOptions,
 ) []hostbus.URLRecord {
 	parsed := parseURL(raw)
@@ -322,9 +382,10 @@ func appendAuthServerMetadataRecord(
 		return records
 	}
 	return append(records, options.applyAuthServerMetadata(hostbus.URLRecord{
-		URL:         parsed,
-		Description: description,
-		Tags:        defaultAuthServerMetadataTags(role, authServerIndex, bundleGroupID),
+		URL:                             parsed,
+		Description:                     description,
+		Tags:                            defaultAuthServerMetadataTags(role, authServerIndex, bundleGroupID),
+		DisallowPrivateHostRegistration: !allowPrivateHostRegistration || !sameURLOrigin(parsed, issuerURL),
 	}, issuerURL))
 }
 

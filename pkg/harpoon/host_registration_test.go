@@ -275,6 +275,183 @@ func TestRegisterHostBundleDerivedEndpointsPrivateHostsOnly(t *testing.T) {
 	}
 }
 
+func TestRegisterHostBundleDisallowsClassifierOnlyPrivateMetadataRecords(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "loopback", url: "https://127.0.0.1:8443/admin"},
+		{name: "private IPv4", url: "https://10.0.0.1/admin"},
+		{name: "unique-local IPv6", url: "https://[fd00::1]/admin"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			registry, err := NewRegistry(logger, false, nil)
+			if err != nil {
+				t.Fatalf("new registry: %v", err)
+			}
+			classifier := hostclassifier.NewHostClassifier(config.HarpoonHostClassifierConfig{
+				IncludeLoopback: true,
+				IncludePrivate:  true,
+			})
+			record := oauthURLRecordForTest(t, tc.url, "registration-endpoint", "0", "")
+			record.DisallowPrivateHostRegistration = true
+
+			if err := registerHostBundle(hostbus.URLBundle{URLs: []hostbus.URLRecord{record}}, classifier, registry, logger); err != nil {
+				t.Fatalf("register bundle: %v", err)
+			}
+			if _, ok := registry.Lookup("oauth-registration-endpoint-0"); ok {
+				t.Fatalf("did not expect classifier-only private target %q to be registered", tc.url)
+			}
+		})
+	}
+}
+
+func TestRegisterHostBundleAllowsPrivateMetadataRecordOnExactProtectedResourceOrigin(t *testing.T) {
+	tests := []struct {
+		name       string
+		origin     string
+		classifier config.HarpoonHostClassifierConfig
+	}{
+		{
+			name:       "private IPv4",
+			origin:     "https://10.0.0.1",
+			classifier: config.HarpoonHostClassifierConfig{IncludePrivate: true},
+		},
+		{
+			name:       "localhost",
+			origin:     "https://localhost",
+			classifier: config.HarpoonHostClassifierConfig{IncludeLoopback: true},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			registry, err := NewRegistry(logger, false, nil)
+			if err != nil {
+				t.Fatalf("new registry: %v", err)
+			}
+			classifier := hostclassifier.NewHostClassifier(tc.classifier)
+
+			endpoint := oauthURLRecordForTest(t, tc.origin+"/register", "registration-endpoint", "0", "")
+			endpoint.DisallowPrivateHostRegistration = true
+			bundle := hostbus.URLBundle{
+				URLs: []hostbus.URLRecord{
+					oauthURLRecordForTest(t, tc.origin+"/mcp", "prmd-resource", "0", ""),
+					endpoint,
+				},
+			}
+
+			if err := registerHostBundle(bundle, classifier, registry, logger); err != nil {
+				t.Fatalf("register bundle: %v", err)
+			}
+
+			assertRegisteredTargetForHostRegistration(
+				t,
+				registry,
+				"oauth-registration-endpoint-0",
+				tc.origin+"/register",
+				registrationScope,
+			)
+		})
+	}
+}
+
+func TestRegisterHostBundleDoesNotAllowDisallowedRecordOnDifferentProtectedResourceOrigin(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry, err := NewRegistry(logger, true, nil)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	classifier := hostclassifier.NewHostClassifier(config.HarpoonHostClassifierConfig{
+		IncludeLoopback: false,
+		IncludePrivate:  false,
+	})
+
+	seed := oauthURLRecordForTest(t, "http://127.0.0.1:8080/mcp", "prmd-resource", "0", "")
+	endpoint := oauthURLRecordForTest(t, "http://127.0.0.1:9090/token", "token-endpoint", "0", "")
+	endpoint.DisallowPrivateHostRegistration = true
+
+	if err := registerHostBundle(
+		hostbus.URLBundle{URLs: []hostbus.URLRecord{seed, endpoint}},
+		classifier,
+		registry,
+		logger,
+	); err != nil {
+		t.Fatalf("register bundle: %v", err)
+	}
+
+	if _, ok := registry.Lookup("oauth-token-endpoint-0"); ok {
+		t.Fatal("did not expect disallowed endpoint on a different origin to re-enter through OAuth policy")
+	}
+}
+
+func TestRegisterHostBundleDoesNotSeedOAuthPolicyFromDisallowedPrivateRecords(t *testing.T) {
+	tests := []struct {
+		name       string
+		host       string
+		classifier config.HarpoonHostClassifierConfig
+	}{
+		{
+			name:       "private IPv4 with private classifier disabled",
+			host:       "10.0.0.1",
+			classifier: config.HarpoonHostClassifierConfig{IncludePrivate: false, IncludeLoopback: false},
+		},
+		{
+			name:       "loopback with loopback classifier disabled",
+			host:       "127.0.0.1",
+			classifier: config.HarpoonHostClassifierConfig{IncludePrivate: false, IncludeLoopback: false},
+		},
+		{
+			name:       "link-local with default classifiers",
+			host:       "169.254.169.254",
+			classifier: config.HarpoonHostClassifierConfig{IncludePrivate: true, IncludeLoopback: true},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			for _, seedRole := range []string{"prmd-resource", "prmd-source"} {
+				seedRole := seedRole
+				t.Run(seedRole, func(t *testing.T) {
+					logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+					registry, err := NewRegistry(logger, false, nil)
+					if err != nil {
+						t.Fatalf("new registry: %v", err)
+					}
+					classifier := hostclassifier.NewHostClassifier(tc.classifier)
+
+					seed := oauthURLRecordForTest(t, "https://"+tc.host+"/mcp", seedRole, "0", "")
+					seed.DisallowPrivateHostRegistration = true
+					endpoint := oauthURLRecordForTest(t, "https://"+tc.host+"/token", "token-endpoint", "0", "")
+					endpoint.DisallowPrivateHostRegistration = true
+
+					if err := registerHostBundle(
+						hostbus.URLBundle{URLs: []hostbus.URLRecord{seed, endpoint}},
+						classifier,
+						registry,
+						logger,
+					); err != nil {
+						t.Fatalf("register bundle: %v", err)
+					}
+
+					if _, ok := registry.Lookup("oauth-" + seedRole + "-0"); ok {
+						t.Fatalf("did not expect disallowed %s seed on %q to be registered", seedRole, tc.host)
+					}
+					if _, ok := registry.Lookup("oauth-token-endpoint-0"); ok {
+						t.Fatalf("did not expect disallowed endpoint on %q to re-enter through OAuth policy", tc.host)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestRegisterHostBundleAllowsOAuthEndpointsOnProtectedResourceHost(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry, err := NewRegistry(logger, true, nil)

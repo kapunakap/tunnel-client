@@ -59,13 +59,26 @@ func startOAuthDiscovery(p discoveryParams) error {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	transportKind := p.MCPConfig.TransportKind
+	serverURL := p.MCPConfig.ServerURL
+	unixSocketPath := p.MCPConfig.UnixSocketPath
+	if mainBinding := p.MCPConfig.MainChannelBinding(); mainBinding != nil {
+		transportKind = mainBinding.TransportKind
+		serverURL = mainBinding.ServerURL
+		unixSocketPath = mainBinding.UnixSocketPath
+	}
 	if transportKind == "" {
 		transportKind = config.MCPTransportHTTPStreamable
 	}
-	serverURL := p.MCPConfig.ServerURL
 
 	p.Lifecycle.Append(fx.Hook{
 		OnStart: func(startCtx context.Context) error {
+			if p.MCPConfig.AllowNoMain {
+				const reason = "oauth discovery disabled because the main channel is not enabled"
+				p.State.Set(nil, nil, nil, nil)
+				logger.DebugContext(startCtx, reason)
+				return nil
+			}
+
 			if transportKind != config.MCPTransportHTTPStreamable || serverURL == nil {
 				reason := fmt.Sprintf("oauth discovery disabled for transport %q", transportKind)
 				if serverURL == nil {
@@ -129,8 +142,9 @@ func startOAuthDiscovery(p discoveryParams) error {
 					start,
 					sourceURL,
 					URLBundleOptions{
-						UnixSocketPath: p.MCPConfig.UnixSocketPath,
-						UnixSocketURL:  p.MCPConfig.ServerURL,
+						UnixSocketPath: unixSocketPath,
+						UnixSocketURL:  serverURL,
+						TrustedMCPURL:  serverURL,
 					},
 					logger,
 				)

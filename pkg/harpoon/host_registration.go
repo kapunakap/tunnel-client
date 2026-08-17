@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"go.uber.org/fx"
@@ -118,12 +119,13 @@ func registerHostBundle(bundle hostbus.URLBundle, classifier *hostclassifier.Hos
 		group := tagValue(record.Tags, hostbus.TagKeyGroup)
 		allowed, reason := shouldRegisterURLRecord(record, classifier, oauthPolicy)
 		if !allowed {
-			logger.Info("harpoon host auto-registration skipped: not private",
+			logger.Info("harpoon host auto-registration skipped: not allowed",
 				slog.String("url", tclog.RedactURL(record.URL)),
 				slog.String("host", record.URL.Hostname()),
 				slog.String("source", source),
 				slog.String("role", role),
 				slog.String("group", group),
+				slog.String("exclusion_reason", reason),
 			)
 			continue
 		}
@@ -197,7 +199,8 @@ func registerHostBundle(bundle hostbus.URLBundle, classifier *hostclassifier.Hos
 }
 
 type oauthProtectedResourceHostPolicy struct {
-	hosts []oauthProtectedResourceHost
+	hosts        []oauthProtectedResourceHost
+	exactOrigins map[oauthProtectedResourceOrigin]struct{}
 }
 
 type oauthProtectedResourceHost struct {
@@ -205,17 +208,30 @@ type oauthProtectedResourceHost struct {
 	allowSubdomain bool
 }
 
+type oauthProtectedResourceOrigin struct {
+	scheme string
+	host   string
+	port   string
+}
+
 func newOAuthProtectedResourceHostPolicy(bundle hostbus.URLBundle) oauthProtectedResourceHostPolicy {
 	seen := make(map[oauthProtectedResourceHost]struct{})
 	hosts := make([]oauthProtectedResourceHost, 0, len(bundle.URLs))
+	exactOrigins := make(map[oauthProtectedResourceOrigin]struct{})
 	for _, record := range bundle.URLs {
 		if !isOAuthURLRecord(record) {
+			continue
+		}
+		if record.DisallowPrivateHostRegistration {
 			continue
 		}
 		switch normalizeToken(tagValue(record.Tags, hostbus.TagKeyRole)) {
 		case rolePRMDResource, rolePRMDSource:
 		default:
 			continue
+		}
+		if origin, ok := newOAuthProtectedResourceOrigin(record.URL); ok {
+			exactOrigins[origin] = struct{}{}
 		}
 		host := normalizedHostname(record.URL)
 		policyHost, ok := newOAuthProtectedResourceHost(host)
@@ -228,7 +244,7 @@ func newOAuthProtectedResourceHostPolicy(bundle hostbus.URLBundle) oauthProtecte
 		seen[policyHost] = struct{}{}
 		hosts = append(hosts, policyHost)
 	}
-	return oauthProtectedResourceHostPolicy{hosts: hosts}
+	return oauthProtectedResourceHostPolicy{hosts: hosts, exactOrigins: exactOrigins}
 }
 
 func newOAuthProtectedResourceHost(host string) (oauthProtectedResourceHost, bool) {
@@ -244,11 +260,48 @@ func newOAuthProtectedResourceHost(host string) (oauthProtectedResourceHost, boo
 	return oauthProtectedResourceHost{host: host, allowSubdomain: true}, true
 }
 
+func newOAuthProtectedResourceOrigin(raw *url.URL) (oauthProtectedResourceOrigin, bool) {
+	if raw == nil {
+		return oauthProtectedResourceOrigin{}, false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(raw.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return oauthProtectedResourceOrigin{}, false
+	}
+	host := normalizedHostname(raw)
+	if host == "" {
+		return oauthProtectedResourceOrigin{}, false
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		host = addr.String()
+	}
+	port := raw.Port()
+	if port != "" {
+		if parsedPort, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(parsedPort)
+		}
+	} else if scheme == "http" {
+		port = "80"
+	} else {
+		port = "443"
+	}
+	return oauthProtectedResourceOrigin{scheme: scheme, host: host, port: port}, true
+}
+
 func shouldRegisterURLRecord(record hostbus.URLRecord, classifier *hostclassifier.HostClassifier, oauthPolicy oauthProtectedResourceHostPolicy) (bool, string) {
 	if record.URL == nil {
 		return false, ""
 	}
 	private, reason := classifier.IsPrivateHost(record.URL.Hostname())
+	if record.DisallowPrivateHostRegistration {
+		if oauthPolicy.allows(record) {
+			return true, registrationScope
+		}
+		if private {
+			return false, "private-host-registration-disabled"
+		}
+		return false, reason
+	}
 	if private {
 		return true, reason
 	}
@@ -259,7 +312,18 @@ func shouldRegisterURLRecord(record hostbus.URLRecord, classifier *hostclassifie
 }
 
 func (p oauthProtectedResourceHostPolicy) allows(record hostbus.URLRecord) bool {
-	if len(p.hosts) == 0 || !isOAuthURLRecord(record) {
+	if !isOAuthURLRecord(record) {
+		return false
+	}
+	if record.DisallowPrivateHostRegistration {
+		origin, ok := newOAuthProtectedResourceOrigin(record.URL)
+		if !ok {
+			return false
+		}
+		_, ok = p.exactOrigins[origin]
+		return ok
+	}
+	if len(p.hosts) == 0 {
 		return false
 	}
 	host := normalizedHostname(record.URL)

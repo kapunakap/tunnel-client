@@ -25,6 +25,7 @@ import (
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	"github.com/openai/tunnel-client/pkg/harpoon"
 	"github.com/openai/tunnel-client/pkg/mcpclient"
+	"github.com/openai/tunnel-client/pkg/oauth"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
 	"github.com/openai/tunnel-client/pkg/types"
 	"github.com/openai/tunnel-client/testsupport/mockmcpserver"
@@ -194,6 +195,7 @@ type Harness struct {
 	MCP             *mockmcpserver.MockMCPServer
 	HarpoonRegistry *harpoon.Registry
 	MCPProbeState   *mcpclient.ProbeState
+	OAuthState      *oauth.DiscoveryState
 	cfg             *config.Config
 	app             *fxtest.App
 	clients         []*TunnelClient
@@ -620,11 +622,12 @@ func (h *Harness) startTunnelClient(t testing.TB) *TunnelClient {
 	var (
 		harpoonRegistry *harpoon.Registry
 		mcpProbeState   *mcpclient.ProbeState
+		oauthState      *oauth.DiscoveryState
 	)
 	options := []fx.Option{
 		fx.Provide(func() io.Writer { return logWriter }),
 		fx.WithLogger(func(*slog.Logger) fxevent.Logger { return fxevent.NopLogger }),
-		fx.Populate(&harpoonRegistry, &mcpProbeState),
+		fx.Populate(&harpoonRegistry, &mcpProbeState, &oauthState),
 		fx.Decorate(func(fetcher controlplane.Fetcher) controlplane.Fetcher {
 			return poller.wrap(fetcher, h.commandObserver)
 		}),
@@ -652,6 +655,7 @@ func (h *Harness) startTunnelClient(t testing.TB) *TunnelClient {
 	if len(h.clients) == 1 {
 		h.HarpoonRegistry = harpoonRegistry
 		h.MCPProbeState = mcpProbeState
+		h.OAuthState = oauthState
 	}
 	return client
 }

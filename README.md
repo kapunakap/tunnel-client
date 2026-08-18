@@ -210,6 +210,16 @@ go build ./...
 go test ./...
 ```
 
+## Dependency SBOM
+
+The repository keeps [`compliance/tunnel-client.spdx.json`](compliance/tunnel-client.spdx.json)
+as a checked-in, deterministic six-platform baseline. It inventories synthetic
+full-client payloads built from declared offline source and vendor snapshots,
+including the pinned Cloudflared module version, purl, and CPE. Do not hand-edit
+the file; maintainers refresh it through the hermetic SBOM generation check
+when dependency inputs or the Cloudflared pin change. This baseline does not
+claim that public release builds consume the same dependency-source snapshots.
+
 Build the CLI binary:
 
 ```bash

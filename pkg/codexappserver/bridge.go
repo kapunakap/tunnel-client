@@ -198,8 +198,8 @@ type Bridge struct {
 	eventCount    int
 	subscribers   map[chan Event]struct{}
 	pending       map[int64]pendingRequest
-	requestSeq    int64
-	eventSeq      int64
+	requestSeq    atomic.Int64
+	eventSeq      atomic.Int64
 	processStderr []string
 }
 
@@ -881,7 +881,7 @@ func (b *Bridge) request(ctx context.Context, method string, params map[string]a
 }
 
 func (b *Bridge) requestNoEnsure(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
-	payloadID := atomic.AddInt64(&b.requestSeq, 1)
+	payloadID := b.requestSeq.Add(1)
 	envelope := map[string]any{
 		"id":     payloadID,
 		"method": method,
@@ -1058,8 +1058,8 @@ func (b *Bridge) stageRequestError(stage string, timeout time.Duration, err erro
 		return nil
 	}
 	detail := strings.TrimSpace(err.Error())
-	if strings.HasPrefix(detail, stage+":") {
-		detail = strings.TrimSpace(strings.TrimPrefix(detail, stage+":"))
+	if trimmedDetail, ok := strings.CutPrefix(detail, stage+":"); ok {
+		detail = strings.TrimSpace(trimmedDetail)
 	}
 	message := stage + " failed"
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -1295,7 +1295,7 @@ func (b *Bridge) handleEnvelope(envelope rpcEnvelope, raw json.RawMessage) {
 }
 
 func (b *Bridge) publish(event Event) {
-	event.Seq = atomic.AddInt64(&b.eventSeq, 1)
+	event.Seq = b.eventSeq.Add(1)
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	}

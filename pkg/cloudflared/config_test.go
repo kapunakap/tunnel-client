@@ -1,6 +1,7 @@
 package cloudflared
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestRenderStandaloneConfigEscapesPathAndAcceptsOverrides(t *testing.T) {
 
 	got, err := RenderStandaloneConfig(cfg)
 	require.NoError(t, err)
-	require.Contains(t, string(got), "token-file: "+yamlQuotedString(cfg.TokenFile))
+	require.Contains(t, string(got), "token-file: "+strconv.Quote(strings.TrimSpace(cfg.TokenFile)))
 	require.Contains(t, string(got), `metrics: "localhost:32123"`)
 	require.Contains(t, string(got), `loglevel: "warn"`)
 	require.Contains(t, string(got), `transport-loglevel: "error"`)

@@ -13,9 +13,9 @@ import (
 	"go.uber.org/fx"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	tclog "github.com/openai/tunnel-client/pkg/log"
 	"github.com/openai/tunnel-client/pkg/proxy"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
 )
 
@@ -28,9 +28,9 @@ import (
 // proxy selection, mTLS config, and raw-HTTP logging remain stable across
 // requests for that channel.
 type ChannelTransportFactory struct {
-	config        *config.MCPConfig
+	config        *runtimeconfig.MCPConfig
 	logger        *slog.Logger
-	logging       *config.LoggingConfig
+	logging       *runtimeconfig.LoggingConfig
 	providers     []TransportProvider
 	meterProvider *sdkmetric.MeterProvider
 	tlsBundle     *tlsconfig.Bundle
@@ -46,8 +46,8 @@ type ChannelTransportFactory struct {
 type channelTransportFactoryParams struct {
 	fx.In
 
-	Config             *config.MCPConfig
-	Logging            *config.LoggingConfig
+	Config             *runtimeconfig.MCPConfig
+	Logging            *runtimeconfig.LoggingConfig
 	Logger             *slog.Logger
 	MeterProvider      *sdkmetric.MeterProvider
 	TLSBundle          *tlsconfig.Bundle
@@ -73,15 +73,15 @@ func newChannelTransportFactory(p channelTransportFactoryParams) (*ChannelTransp
 }
 
 // HTTPClientForBinding returns the HTTP client used for streamable MCP transports for a binding.
-func (f *ChannelTransportFactory) HTTPClientForBinding(binding config.MCPChannelBinding) (*http.Client, error) {
+func (f *ChannelTransportFactory) HTTPClientForBinding(binding runtimeconfig.MCPChannelBinding) (*http.Client, error) {
 	if f == nil {
 		return nil, fmt.Errorf("mcpclient: channel transport factory is nil")
 	}
 	transportKind := binding.TransportKind
 	if transportKind == "" {
-		transportKind = config.MCPTransportHTTPStreamable
+		transportKind = runtimeconfig.MCPTransportHTTPStreamable
 	}
-	if transportKind != config.MCPTransportHTTPStreamable {
+	if transportKind != runtimeconfig.MCPTransportHTTPStreamable {
 		return f.httpClientForKey("default", nil, "", nil, nil)
 	}
 	channelName := binding.Channel.Canonical()
@@ -95,7 +95,7 @@ func (f *ChannelTransportFactory) HTTPClientForBinding(binding config.MCPChannel
 // use of the same channel is collapsed with singleflight so duplicate connector
 // traffic cannot race into multiple stdio child processes or independent HTTP
 // transport wrappers.
-func (f *ChannelTransportFactory) Build(binding config.MCPChannelBinding) (mcp.Transport, error) {
+func (f *ChannelTransportFactory) Build(binding runtimeconfig.MCPChannelBinding) (mcp.Transport, error) {
 	if f == nil {
 		return nil, fmt.Errorf("mcpclient: channel transport factory is nil")
 	}
@@ -121,7 +121,7 @@ func (f *ChannelTransportFactory) Build(binding config.MCPChannelBinding) (mcp.T
 
 		transportKind := binding.TransportKind
 		if transportKind == "" {
-			transportKind = config.MCPTransportHTTPStreamable
+			transportKind = runtimeconfig.MCPTransportHTTPStreamable
 		}
 		provider, err := selectTransportProvider(transportKind, f.providers)
 		if err != nil {
@@ -214,10 +214,10 @@ func (f *ChannelTransportFactory) logProxyConfig() {
 		channel := binding.Channel.Canonical()
 		transportKind := binding.TransportKind
 		if transportKind == "" {
-			transportKind = config.MCPTransportHTTPStreamable
+			transportKind = runtimeconfig.MCPTransportHTTPStreamable
 		}
 		var targetURL *url.URL
-		if transportKind == config.MCPTransportHTTPStreamable {
+		if transportKind == runtimeconfig.MCPTransportHTTPStreamable {
 			targetURL = binding.ServerURL
 		}
 		route := proxy.ResolveRoute(proxy.RouteKindMCPChannel, channel.String(), targetURL, binding.HTTPProxy, binding.HTTPProxySource, os.LookupEnv)

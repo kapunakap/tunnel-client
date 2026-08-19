@@ -10,14 +10,14 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/fx"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	"github.com/openai/tunnel-client/pkg/controlplane/internal"
-	"github.com/openai/tunnel-client/pkg/harpoon"
 	tclog "github.com/openai/tunnel-client/pkg/log"
 	"github.com/openai/tunnel-client/pkg/mcpclient"
 	"github.com/openai/tunnel-client/pkg/mcpserverinfo"
 	"github.com/openai/tunnel-client/pkg/proxy"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
+	"github.com/openai/tunnel-client/pkg/runtimeharpoon"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
 	"github.com/openai/tunnel-client/pkg/types"
 )
@@ -32,11 +32,11 @@ var Module = fx.Module(
 type fetcherParams struct {
 	fx.In
 
-	Config          *config.ControlPlaneConfig
-	MCPConfig       *config.MCPConfig
-	HarpoonRegistry *harpoon.Registry `optional:"true"`
+	Config          *runtimeconfig.ControlPlaneConfig
+	MCPConfig       *runtimeconfig.MCPConfig
+	HarpoonRegistry runtimeharpoon.RegistryCounter `optional:"true"`
 	TLSBundle       *tlsconfig.Bundle
-	Logging         *config.LoggingConfig
+	Logging         *runtimeconfig.LoggingConfig
 	Logger          *slog.Logger
 	MeterProvider   *sdkmetric.MeterProvider
 }
@@ -89,7 +89,7 @@ func newTunnelServiceClient(p fetcherParams) (clientResult, error) {
 	}, nil
 }
 
-func newMCPServerInfoHeaderProviderForPollChannels(mcpConfig *config.MCPConfig, controlPlane *config.ControlPlaneConfig, harpoonEnabled func() bool) (func() (string, error), error) {
+func newMCPServerInfoHeaderProviderForPollChannels(mcpConfig *runtimeconfig.MCPConfig, controlPlane *runtimeconfig.ControlPlaneConfig, harpoonEnabled func() bool) (func() (string, error), error) {
 	effectiveConfig := mcpConfigForPollChannels(mcpConfig, controlPlane)
 	harpoonAllowed := controlPlane == nil || !controlPlane.PollChannelsConfigured || containsPollChannel(controlPlane.PollChannels, types.ChannelHarpoon)
 	if len(effectiveConfig.ChannelBindings) > 0 {
@@ -112,7 +112,7 @@ func newMCPServerInfoHeaderProviderForPollChannels(mcpConfig *config.MCPConfig, 
 	return provider, nil
 }
 
-func mcpConfigForPollChannels(mcpConfig *config.MCPConfig, controlPlane *config.ControlPlaneConfig) *config.MCPConfig {
+func mcpConfigForPollChannels(mcpConfig *runtimeconfig.MCPConfig, controlPlane *runtimeconfig.ControlPlaneConfig) *runtimeconfig.MCPConfig {
 	if mcpConfig == nil || controlPlane == nil || !controlPlane.PollChannelsConfigured {
 		return mcpConfig
 	}
@@ -138,14 +138,14 @@ func containsPollChannel(channels []types.Channel, want types.Channel) bool {
 	return false
 }
 
-func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) (string, error) {
+func buildMCPServerInfoHeader(mcpConfig *runtimeconfig.MCPConfig, harpoonEnabled bool) (string, error) {
 	if mcpConfig == nil {
 		return "", errors.New("controlplane: MCP config is required")
 	}
 
 	bindings := mcpConfig.ChannelBindings
 	if len(bindings) == 0 && !mcpConfig.AllowNoMain {
-		bindings = []config.MCPChannelBinding{{
+		bindings = []runtimeconfig.MCPChannelBinding{{
 			Channel:       types.DefaultChannel,
 			TransportKind: mcpConfig.TransportKind,
 		}}
@@ -188,11 +188,11 @@ func buildMCPServerInfoHeader(mcpConfig *config.MCPConfig, harpoonEnabled bool) 
 	return header, nil
 }
 
-func processAffinityForTransport(kind config.MCPTransportKind) (bool, error) {
+func processAffinityForTransport(kind runtimeconfig.MCPTransportKind) (bool, error) {
 	switch kind {
-	case "", config.MCPTransportHTTPStreamable:
+	case "", runtimeconfig.MCPTransportHTTPStreamable:
 		return false, nil
-	case config.MCPTransportStdio, config.MCPTransportInMemory:
+	case runtimeconfig.MCPTransportStdio, runtimeconfig.MCPTransportInMemory:
 		return true, nil
 	default:
 		return false, fmt.Errorf("controlplane: build MCP server info: unsupported MCP transport %q", kind)
@@ -202,7 +202,7 @@ func processAffinityForTransport(kind config.MCPTransportKind) (bool, error) {
 type pollerParams struct {
 	fx.In
 
-	Config             *config.ControlPlaneConfig
+	Config             *runtimeconfig.ControlPlaneConfig
 	PolledCommandQueue controlplane.PolledCommandQueue
 	Fetcher            controlplane.Fetcher
 	Logger             *slog.Logger
@@ -228,8 +228,8 @@ type runnerParams struct {
 	Lifecycle     fx.Lifecycle
 	Logger        *slog.Logger
 	Poller        internal.Poller
-	MCPConfig     *config.MCPConfig     `optional:"true"`
-	MCPProbeState *mcpclient.ProbeState `optional:"true"`
+	MCPConfig     *runtimeconfig.MCPConfig `optional:"true"`
+	MCPProbeState *mcpclient.ProbeState    `optional:"true"`
 }
 
 type metadataParams struct {
@@ -352,7 +352,7 @@ func runPoller(p runnerParams) error {
 // readiness through ProbeState.
 func waitForMCPStartupBeforePolling(
 	ctx context.Context,
-	mcpConfig *config.MCPConfig,
+	mcpConfig *runtimeconfig.MCPConfig,
 	probeState *mcpclient.ProbeState,
 	logger *slog.Logger,
 ) bool {

@@ -275,12 +275,17 @@ func fetchAuthServerMetadataDocument(
 	if err != nil {
 		return nil, nil, err
 	}
+	redirectOrigin, err := url.Parse(metadataURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	discoveryClient := withSameOriginRedirects(client, redirectOrigin)
 
 	var res *http.Response
 	if retryMode == discoveryRetryModeTimeoutBackoff {
-		res, err = doWithRetryForTimeout(ctx, client, req, nil)
+		res, err = doWithRetryForTimeout(ctx, discoveryClient, req, nil)
 	} else {
-		res, err = client.Do(req)
+		res, err = discoveryClient.Do(req)
 	}
 	if err != nil {
 		return nil, nil, err

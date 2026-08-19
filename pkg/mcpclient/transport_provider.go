@@ -6,19 +6,19 @@ import (
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
 // TransportProvider constructs an MCP transport for a specific transport kind.
 type TransportProvider interface {
-	Kind() config.MCPTransportKind
+	Kind() runtimeconfig.MCPTransportKind
 	Build(TransportBuildParams) (mcp.Transport, error)
 }
 
 // TransportBuildParams carries shared dependencies for transport construction.
 type TransportBuildParams struct {
-	Config     *config.MCPConfig
-	Binding    config.MCPChannelBinding
+	Config     *runtimeconfig.MCPConfig
+	Binding    runtimeconfig.MCPChannelBinding
 	HTTPClient *http.Client
 }
 
@@ -28,8 +28,8 @@ func newStreamableTransportProvider() TransportProvider {
 	return streamableTransportProvider{}
 }
 
-func (streamableTransportProvider) Kind() config.MCPTransportKind {
-	return config.MCPTransportHTTPStreamable
+func (streamableTransportProvider) Kind() runtimeconfig.MCPTransportKind {
+	return runtimeconfig.MCPTransportHTTPStreamable
 }
 
 func (streamableTransportProvider) Build(params TransportBuildParams) (mcp.Transport, error) {
@@ -46,8 +46,8 @@ type injectableTransportProvider struct {
 	transport mcp.Transport
 }
 
-func (p injectableTransportProvider) Kind() config.MCPTransportKind {
-	return config.MCPTransportInMemory
+func (p injectableTransportProvider) Kind() runtimeconfig.MCPTransportKind {
+	return runtimeconfig.MCPTransportInMemory
 }
 
 func (p injectableTransportProvider) Build(TransportBuildParams) (mcp.Transport, error) {
@@ -61,8 +61,8 @@ type stdioTransportProvider struct {
 	commandFactory *stdioCommandTransportFactory
 }
 
-func (p stdioTransportProvider) Kind() config.MCPTransportKind {
-	return config.MCPTransportStdio
+func (p stdioTransportProvider) Kind() runtimeconfig.MCPTransportKind {
+	return runtimeconfig.MCPTransportStdio
 }
 
 func (p stdioTransportProvider) Build(params TransportBuildParams) (mcp.Transport, error) {
@@ -72,7 +72,7 @@ func (p stdioTransportProvider) Build(params TransportBuildParams) (mcp.Transpor
 	if len(params.Binding.CommandArgs) == 0 {
 		return nil, errors.New("mcpclient: stdio transport requires mcp.command")
 	}
-	commandConfig := &config.MCPConfig{
+	commandConfig := &runtimeconfig.MCPConfig{
 		Command:     params.Binding.Command,
 		CommandArgs: params.Binding.CommandArgs,
 	}
@@ -83,11 +83,11 @@ func (p stdioTransportProvider) Build(params TransportBuildParams) (mcp.Transpor
 	return newContextCancellationPreservingSharedConnectionTransport(transport), nil
 }
 
-func selectTransportProvider(kind config.MCPTransportKind, providers []TransportProvider) (TransportProvider, error) {
+func selectTransportProvider(kind runtimeconfig.MCPTransportKind, providers []TransportProvider) (TransportProvider, error) {
 	if kind == "" {
-		kind = config.MCPTransportHTTPStreamable
+		kind = runtimeconfig.MCPTransportHTTPStreamable
 	}
-	byKind := make(map[config.MCPTransportKind]TransportProvider, len(providers))
+	byKind := make(map[runtimeconfig.MCPTransportKind]TransportProvider, len(providers))
 	for _, provider := range providers {
 		if provider == nil {
 			continue

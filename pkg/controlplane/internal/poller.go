@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/jpillora/backoff"
-	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -68,7 +68,7 @@ func NewPoller(q queue, fetcher controlplane.Fetcher, logger *slog.Logger, meter
 	if logger == nil {
 		logger = slog.Default()
 	}
-	pollConfig := config.ControlPlaneConfig{
+	pollConfig := runtimeconfig.ControlPlaneConfig{
 		PollTimeout:           pollTimeout,
 		PollDeadlineGuardrail: pollDeadlineGuardrail,
 	}
@@ -138,7 +138,7 @@ func (p *poller) Run(ctx context.Context) {
 		p.metrics.totalCyclesStarted.Add(ctx, 1)
 
 		pollStart := time.Now()
-		pollDeadline := (config.ControlPlaneConfig{
+		pollDeadline := (runtimeconfig.ControlPlaneConfig{
 			PollTimeout:           p.pollTimeout,
 			PollDeadlineGuardrail: p.pollGuardrail,
 		}).PollDeadlineTimeoutOrDefault()

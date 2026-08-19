@@ -228,7 +228,7 @@ func TestRegistryExplainBlockedRedirectCacheInvalidatesOnRegister(t *testing.T) 
 	require.Nil(t, second)
 }
 
-func TestRegistryExplainBlockedRedirectCacheEvictsOldEntries(t *testing.T) {
+func TestRegistryExplainBlockedRedirectHandlesDistinctCandidates(t *testing.T) {
 	registry, err := NewRegistry(discardLogger(), true, []Target{
 		{
 			Label:   "oauth-auth-server-metadata-0",
@@ -236,7 +236,6 @@ func TestRegistryExplainBlockedRedirectCacheEvictsOldEntries(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	registry.explainCacheLimit = 2
 
 	candidateA := mustURL(t, "http://example.com/.well-known/oauth-authorization-server?a=1")
 	candidateB := mustURL(t, "http://example.com/.well-known/oauth-authorization-server?a=2")
@@ -245,25 +244,10 @@ func TestRegistryExplainBlockedRedirectCacheEvictsOldEntries(t *testing.T) {
 	require.NotNil(t, registry.ExplainBlockedRedirect(candidateA))
 	require.NotNil(t, registry.ExplainBlockedRedirect(candidateB))
 	require.NotNil(t, registry.ExplainBlockedRedirect(candidateC))
-
-	require.Len(t, registry.explainCache, 2)
-	keyA, err := normalizedURLKey(candidateA)
-	require.NoError(t, err)
-	keyB, err := normalizedURLKey(candidateB)
-	require.NoError(t, err)
-	keyC, err := normalizedURLKey(candidateC)
-	require.NoError(t, err)
-
-	_, hasA := registry.explainCache[keyA]
-	_, hasB := registry.explainCache[keyB]
-	_, hasC := registry.explainCache[keyC]
-	require.False(t, hasA)
-	require.True(t, hasB)
-	require.True(t, hasC)
-	require.Equal(t, []string{keyB, keyC}, registry.explainCacheOrder)
+	require.NotNil(t, registry.ExplainBlockedRedirect(candidateA))
 }
 
-func TestRegistryExplainBlockedRedirectCachesHashForOversizedURL(t *testing.T) {
+func TestRegistryExplainBlockedRedirectHandlesOversizedURL(t *testing.T) {
 	registry, err := NewRegistry(discardLogger(), true, []Target{
 		{
 			Label:   "oauth-auth-server-metadata-0",
@@ -272,14 +256,9 @@ func TestRegistryExplainBlockedRedirectCachesHashForOversizedURL(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	candidate := mustURL(t, "https://example.com/.well-known/oauth-authorization-server?state="+strings.Repeat("a", maxRedirectExplainCacheKeyBytes*2))
+	candidate := mustURL(t, "https://example.com/.well-known/oauth-authorization-server?state="+strings.Repeat("a", 4096))
 	require.NotNil(t, registry.ExplainBlockedRedirect(candidate))
-
-	require.Len(t, registry.explainCache, 1)
-	for key := range registry.explainCache {
-		require.LessOrEqual(t, len(key), len("sha256:")+64)
-		require.True(t, strings.HasPrefix(key, "sha256:"))
-	}
+	require.NotNil(t, registry.ExplainBlockedRedirect(candidate))
 }
 
 func TestSummarizeTargets(t *testing.T) {

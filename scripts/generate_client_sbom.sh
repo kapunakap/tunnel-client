@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the deterministic six-platform full-client payload, then delegate SPDX
-# generation and normalization to the shared oai_sbom tool.
+# Build deterministic six-platform client and narrow-runtime payloads, then
+# delegate SPDX generation and normalization to the shared oai_sbom tool.
 
 readonly BASELINE_SEMANTIC_VERSION="0.0.0-baseline"
 readonly BASELINE_GIT_SHA="baseline"
@@ -43,18 +43,23 @@ usage() {
   cat <<'EOF'
 Usage:
   ./scripts/generate_client_sbom.sh \
+    --flavor client|runtime|runtime-cloudflared \
     --source-root <staged-source> \
     --cloudflared-source <staged-source> \
     --go <absolute-path> \
     --python <absolute-path> \
     --source-preparer <absolute-path> \
+    [--license-report-builder <absolute-path>] \
+    [--base-license-report <absolute-path>] \
+    [--companion-license-report <absolute-path>] \
     --oai-sbom <absolute-path> \
     --syft <absolute-path> \
     --syft-lock <absolute-path> \
     --output <spdx-path>
 
 Builds a deterministic six-platform baseline from declared offline inputs and
-generates one SPDX 2.3 report through oai_sbom.
+generates one SPDX 2.3 report through oai_sbom. Runtime flavors also stage
+their checked-in artifact-scoped license sidecars.
 EOF
 }
 
@@ -67,17 +72,25 @@ clear_ambient_go_build_environment() {
   unset "${AMBIENT_GO_BUILD_ENV_VARS[@]}"
 }
 
+flavor="client"
 source_root=""
 cloudflared_source=""
 go_bin=""
 python_bin=""
 source_preparer_bin=""
+license_report_builder=""
+base_license_report=""
+companion_license_report=""
 oai_sbom_bin=""
 syft_bin=""
 syft_lock=""
 output_path=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --flavor)
+      flavor="${2:-}"
+      shift 2
+      ;;
     --source-root)
       source_root="${2:-}"
       shift 2
@@ -96,6 +109,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source-preparer)
       source_preparer_bin="${2:-}"
+      shift 2
+      ;;
+    --license-report-builder)
+      license_report_builder="${2:-}"
+      shift 2
+      ;;
+    --base-license-report)
+      base_license_report="${2:-}"
+      shift 2
+      ;;
+    --companion-license-report)
+      companion_license_report="${2:-}"
       shift 2
       ;;
     --oai-sbom)
@@ -124,6 +149,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+case "${flavor}" in
+  client|runtime|runtime-cloudflared) ;;
+  *) die "--flavor must be client, runtime, or runtime-cloudflared" ;;
+esac
 
 for required_arg in \
   source_root \
@@ -154,6 +184,16 @@ done
 [[ "${syft_lock}" == /* && -f "${syft_lock}" ]] ||
   die "--syft-lock must be an absolute file"
 [[ "${output_path}" == /* ]] || die "--output must be an absolute path"
+if [[ "${flavor}" != "client" ]]; then
+  [[ "${license_report_builder}" == /* && -x "${license_report_builder}" ]] ||
+    die "--license-report-builder must be an absolute executable for runtime flavors"
+  [[ "${base_license_report}" == /* && -f "${base_license_report}" ]] ||
+    die "--base-license-report must be an absolute file for runtime flavors"
+  if [[ "${flavor}" == "runtime-cloudflared" ]]; then
+    [[ "${companion_license_report}" == /* && -f "${companion_license_report}" ]] ||
+      die "--companion-license-report must be an absolute file for runtime-cloudflared"
+  fi
+fi
 [[ -n "${BAZEL_TEST:-}" ]] || die "BAZEL_TEST is required"
 [[ -n "${TEST_TMPDIR:-}" && "${TEST_TMPDIR}" == /* ]] ||
   die "TEST_TMPDIR is required under Bazel"
@@ -169,8 +209,46 @@ mkdir -p "${tmp_parent}"
 tmp_dir="$(mktemp -d "${tmp_parent%/}/tunnel-client-sbom.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
+target=""
+binary_name=""
+linked_flavor=""
+stable_root_name=""
+source_name=""
+include_cloudflared="false"
+include_runtime_sidecars="false"
+cloudflared_manifest_path=""
+case "${flavor}" in
+  client)
+    target="./cmd/client"
+    binary_name="tunnel-client"
+    linked_flavor="full"
+    stable_root_name="client"
+    source_name="tunnel-client-baseline"
+    include_cloudflared="true"
+    cloudflared_manifest_path="pkg/cloudflared/manifest.json"
+    ;;
+  runtime)
+    target="./cmd/client-runtime"
+    binary_name="tunnel-client-runtime"
+    linked_flavor="runtime"
+    stable_root_name="runtime"
+    source_name="tunnel-client-runtime-baseline"
+    include_runtime_sidecars="true"
+    ;;
+  runtime-cloudflared)
+    target="./cmd/client-runtime-cloudflared"
+    binary_name="tunnel-client-runtime-cloudflared"
+    linked_flavor="runtime-cloudflared"
+    stable_root_name="runtime-cloudflared"
+    source_name="tunnel-client-runtime-cloudflared-baseline"
+    include_cloudflared="true"
+    include_runtime_sidecars="true"
+    cloudflared_manifest_path="pkg/cloudflared/runtime/manifest.json"
+    ;;
+esac
+
 readonly canonical_source_root="${tmp_dir}/canonical-source"
-readonly stable_root="${tmp_dir}/client"
+readonly stable_root="${tmp_dir}/${stable_root_name}"
 readonly payload_root="${stable_root}/payloads"
 readonly go_cache_dir="${tmp_dir}/go-cache"
 readonly go_mod_cache_dir="${tmp_dir}/go-mod-cache"
@@ -215,14 +293,18 @@ selected_goroot="$(
   die "--go reported an invalid GOROOT: ${selected_goroot}"
 export GOROOT="${selected_goroot}"
 
-for required_file in \
-  go.mod \
-  go.sum \
-  LICENSE \
-  NOTICE \
-  vendor/modules.txt \
-  cmd/client/main.go \
-  pkg/cloudflared/manifest.json; do
+required_source_files=(
+  go.mod
+  go.sum
+  LICENSE
+  NOTICE
+  vendor/modules.txt
+  "${target#./}/main.go"
+)
+if [[ "${include_cloudflared}" == "true" ]]; then
+  required_source_files+=("${cloudflared_manifest_path}")
+fi
+for required_file in "${required_source_files[@]}"; do
   [[ -f "${source_root}/${required_file}" ]] ||
     die "required source input is missing: ${required_file}"
 done
@@ -250,8 +332,7 @@ case "${actual_go_version}" in
 esac
 
 for relative_path in go.mod go.sum vendor LICENSE NOTICE cmd pkg docs plugins; do
-  [[ -e "${source_root}/${relative_path}" ]] ||
-    die "canonical source input is missing: ${relative_path}"
+  [[ -e "${source_root}/${relative_path}" ]] || continue
   cp -R -- "${source_root}/${relative_path}" "${canonical_source_root}/${relative_path}"
 done
 chmod -R u+rwX "${canonical_source_root}"
@@ -268,23 +349,29 @@ module_path="$(
 [[ "${module_path}" == "${CANONICAL_MODULE_PATH}" ]] ||
   die "canonical source module path mismatch: got ${module_path}"
 
-cloudflared_metadata="$(
-  "${python_bin}" "${source_preparer_bin}" cloudflared-metadata \
-    --manifest "${source_root}/pkg/cloudflared/manifest.json" \
-    --source-root "${cloudflared_source}"
-)" || die "could not read cloudflared manifest"
-IFS=$'\t' read -r \
-  cloudflared_version \
-  cloudflared_build_time \
-  cloudflared_module_path \
-  cloudflared_module_version <<<"${cloudflared_metadata}"
-[[ -n "${cloudflared_version}" &&
-  -n "${cloudflared_build_time}" &&
-  -n "${cloudflared_module_path}" &&
-  -n "${cloudflared_module_version}" ]] ||
-  die "cloudflared manifest is missing required metadata"
+cloudflared_version=""
+cloudflared_build_time=""
+cloudflared_module_path=""
+cloudflared_module_version=""
+if [[ "${include_cloudflared}" == "true" ]]; then
+  cloudflared_metadata="$(
+    "${python_bin}" "${source_preparer_bin}" cloudflared-metadata \
+      --manifest "${source_root}/${cloudflared_manifest_path}" \
+      --source-root "${cloudflared_source}"
+  )" || die "could not read cloudflared manifest"
+  IFS=$'\t' read -r \
+    cloudflared_version \
+    cloudflared_build_time \
+    cloudflared_module_path \
+    cloudflared_module_version <<<"${cloudflared_metadata}"
+  [[ -n "${cloudflared_version}" &&
+    -n "${cloudflared_build_time}" &&
+    -n "${cloudflared_module_path}" &&
+    -n "${cloudflared_module_version}" ]] ||
+    die "cloudflared manifest is missing required metadata"
+fi
 
-client_ldflags="-X ${module_path}/pkg/version.semanticVersion=${BASELINE_SEMANTIC_VERSION} -X ${module_path}/pkg/version.GitSHA=${BASELINE_GIT_SHA} -X ${module_path}/pkg/version.GoVersion=${actual_go_version} -X ${module_path}/pkg/version.BuildFlags=-trimpath,-buildvcs=false -X ${module_path}/pkg/version.Flavor=full"
+artifact_ldflags="-X ${module_path}/pkg/version.semanticVersion=${BASELINE_SEMANTIC_VERSION} -X ${module_path}/pkg/version.GitSHA=${BASELINE_GIT_SHA} -X ${module_path}/pkg/version.GoVersion=${actual_go_version} -X ${module_path}/pkg/version.BuildFlags=-trimpath,-buildvcs=false -X ${module_path}/pkg/version.Flavor=${linked_flavor}"
 cloudflared_ldflags="-X main.Version=${cloudflared_version} -X main.BuildTime=${cloudflared_build_time}"
 
 for platform in "${PLATFORMS[@]}"; do
@@ -311,50 +398,76 @@ for platform in "${PLATFORMS[@]}"; do
       -mod=vendor \
       -trimpath \
       -buildvcs=false \
-      -ldflags "${client_ldflags}" \
-      -o "${payload_dir}/tunnel-client${extension}" \
-      ./cmd/client
+      -ldflags "${artifact_ldflags}" \
+      -o "${payload_dir}/${binary_name}${extension}" \
+      "${target}"
   )
 
-  (
-    cd "${cloudflared_source}"
-    env \
-      GOWORK=off \
-      GOPROXY=off \
-      GOSUMDB=off \
-      GOTOOLCHAIN=local \
-      GOCACHE="${go_cache_dir}" \
-      GOMODCACHE="${go_mod_cache_dir}" \
-      GOOS="${goos}" \
-      GOARCH="${goarch}" \
-      CGO_ENABLED=0 \
-      "${go_bin}" build \
-      -mod=vendor \
-      -trimpath \
-      -buildvcs=false \
-      -ldflags "${cloudflared_ldflags}" \
-      -o "${payload_dir}/cloudflared${extension}" \
-      ./cmd/cloudflared
-  )
-  cp "${source_root}/pkg/cloudflared/manifest.json" "${payload_dir}/cloudflared-manifest.json"
+  if [[ "${include_cloudflared}" == "true" ]]; then
+    (
+      cd "${cloudflared_source}"
+      env \
+        GOWORK=off \
+        GOPROXY=off \
+        GOSUMDB=off \
+        GOTOOLCHAIN=local \
+        GOCACHE="${go_cache_dir}" \
+        GOMODCACHE="${go_mod_cache_dir}" \
+        GOOS="${goos}" \
+        GOARCH="${goarch}" \
+        CGO_ENABLED=0 \
+        "${go_bin}" build \
+        -mod=vendor \
+        -trimpath \
+        -buildvcs=false \
+        -ldflags "${cloudflared_ldflags}" \
+        -o "${payload_dir}/cloudflared${extension}" \
+        ./cmd/cloudflared
+    )
+    cp "${source_root}/${cloudflared_manifest_path}" "${payload_dir}/cloudflared-manifest.json"
+  fi
   cp "${source_root}/LICENSE" "${payload_dir}/LICENSE"
+  if [[ "${include_runtime_sidecars}" == "true" ]]; then
+    cp "${source_root}/NOTICE" "${payload_dir}/NOTICE"
+    report_args=(
+      --flavor "${flavor}"
+      --goos "${goos}"
+      --goarch "${goarch}"
+      --python "${python_bin}"
+      --base-report "${base_license_report}"
+      --output "${payload_dir}/${binary_name}-${goos}-${goarch}-licenses.txt"
+    )
+    if [[ -n "${companion_license_report}" ]]; then
+      report_args+=(--companion-report "${companion_license_report}")
+    fi
+    "${license_report_builder}" "${report_args[@]}" >/dev/null
+  fi
 done
 
-"${oai_sbom_bin}" generate-spdx \
-  --payload-dir "${stable_root}" \
-  --output "${output_path}" \
-  --syft "${syft_bin}" \
-  --syft-lock "${syft_lock}" \
-  --source-name tunnel-client-baseline \
-  --source-version baseline \
-  --package-version \
-  "${cloudflared_module_path}=${cloudflared_module_version}" \
-  --package-purl \
-  "${cloudflared_module_path}=pkg:golang/${cloudflared_module_path}@${cloudflared_module_version}" \
-  --package-cpe23 \
-  "${cloudflared_module_path}=cpe:2.3:a:cloudflare:cloudflared:${cloudflared_version}:*:*:*:*:*:*:*" \
-  --normalize \
-  --namespace-prefix https://github.com/openai/tunnel-client/sbom/baseline/ \
+oai_sbom_args=(
+  generate-spdx
+  --payload-dir "${stable_root}"
+  --output "${output_path}"
+  --syft "${syft_bin}"
+  --syft-lock "${syft_lock}"
+  --source-name "${source_name}"
+  --source-version baseline
+)
+if [[ "${include_cloudflared}" == "true" ]]; then
+  oai_sbom_args+=(
+    --package-version
+    "${cloudflared_module_path}=${cloudflared_module_version}"
+    --package-purl
+    "${cloudflared_module_path}=pkg:golang/${cloudflared_module_path}@${cloudflared_module_version}"
+    --package-cpe23
+    "${cloudflared_module_path}=cpe:2.3:a:cloudflare:cloudflared:${cloudflared_version}:*:*:*:*:*:*:*"
+  )
+fi
+oai_sbom_args+=(
+  --normalize
+  --namespace-prefix https://github.com/openai/tunnel-client/sbom/baseline/
   --cache-dir "${oai_sbom_cache_dir}"
+)
+"${oai_sbom_bin}" "${oai_sbom_args[@]}"
 
-printf 'generated tunnel-client SBOM for six platforms\n'
+printf 'generated %s SBOM for six platforms\n' "${flavor}"

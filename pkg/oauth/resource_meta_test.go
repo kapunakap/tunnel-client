@@ -333,6 +333,46 @@ func TestBuildOAuthDiscoveryCandidatesProbeFirst(t *testing.T) {
 	require.Equal(t, expected, candidateURLsToStrings(candidates))
 }
 
+func TestBuildOAuthDiscoveryCandidatesPreservesCrossOriginHeaderDestination(t *testing.T) {
+	t.Parallel()
+
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(attacker.Close)
+
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/mcp" {
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/metadata"`, attacker.URL))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	serverURL = server.URL
+
+	serverEndpoint, err := url.Parse(serverURL + "/public/mcp")
+	require.NoError(t, err)
+	candidates, probe, err := BuildOAuthDiscoveryCandidates(
+		context.Background(),
+		server.Client(),
+		serverEndpoint,
+		testLogger(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, probe)
+	require.True(t, probe.Attempted)
+	require.Equal(t, attacker.URL+"/metadata", probe.URL)
+	require.Empty(t, probe.Error)
+	require.Equal(t, []string{
+		attacker.URL + "/metadata",
+		server.URL + "/.well-known/oauth-protected-resource/public/mcp",
+		server.URL + "/.well-known/oauth-protected-resource",
+	}, candidateURLsToStrings(candidates))
+}
+
 func TestBuildOAuthDiscoveryCandidatesFallbackToGET(t *testing.T) {
 	t.Parallel()
 

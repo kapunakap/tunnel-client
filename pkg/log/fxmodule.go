@@ -8,7 +8,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/openai/tunnel-client/pkg/clientinstance"
-	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
 // Module exposes the logger as an Fx module that owns the lifecycle of any
@@ -19,14 +19,14 @@ type loggerParams struct {
 	fx.In
 
 	Lifecycle     fx.Lifecycle
-	Config        *config.LoggingConfig
-	ControlPlane  *config.ControlPlaneConfig
+	Config        *runtimeconfig.LoggingConfig
+	ControlPlane  *runtimeconfig.ControlPlaneConfig
 	LevelControl  *LevelController
 	DefaultWriter io.Writer `optional:"true"`
 	Sink          Sink      `optional:"true"`
 }
 
-func newLevelController(cfg *config.LoggingConfig) (*LevelController, error) {
+func newLevelController(cfg *runtimeconfig.LoggingConfig) (*LevelController, error) {
 	return NewLevelController(cfg)
 }
 

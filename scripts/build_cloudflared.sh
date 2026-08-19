@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly DEFAULT_MANIFEST="${SCRIPT_DIR}/../pkg/cloudflared/manifest.json"
+readonly EXPORTED_RUNTIME_MANIFEST="${SCRIPT_DIR}/../pkg/cloudflared/runtime/manifest.json"
 
 usage() {
   cat <<'EOF'
@@ -48,6 +49,10 @@ goos=""
 goarch=""
 output=""
 manifest="${DEFAULT_MANIFEST}"
+# The runtime-cloudflared source export carries only its runtime-scoped copy.
+if [[ ! -f "${manifest}" && -f "${EXPORTED_RUNTIME_MANIFEST}" ]]; then
+  manifest="${EXPORTED_RUNTIME_MANIFEST}"
+fi
 describe=false
 
 while [[ $# -gt 0 ]]; do

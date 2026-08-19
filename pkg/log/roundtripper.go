@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 
-	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
 // LoggingRoundTripper wraps a base RoundTripper and emits raw HTTP request and response dumps when enabled.
@@ -25,7 +25,7 @@ func (valueFreeContext) Value(any) any { return nil }
 
 // NewRoundTripper constructs a RoundTripper that logs raw HTTP traffic when the provided logging config enables it.
 // The component name, when non-empty, is attached to the emitted logs via the FieldComponent attribute.
-func NewRoundTripper(base http.RoundTripper, logger *slog.Logger, cfg *config.LoggingConfig, component string) http.RoundTripper {
+func NewRoundTripper(base http.RoundTripper, logger *slog.Logger, cfg *runtimeconfig.LoggingConfig, component string) http.RoundTripper {
 	if base == nil {
 		panic("log.NewRoundTripper: base transport is required")
 	}

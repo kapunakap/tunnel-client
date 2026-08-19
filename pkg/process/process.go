@@ -10,8 +10,8 @@ import (
 
 	"go.uber.org/fx"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	tclog "github.com/openai/tunnel-client/pkg/log"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
 // Module wires process-level utilities like PID file management.
@@ -21,7 +21,7 @@ type pidFileParams struct {
 	fx.In
 
 	Lifecycle fx.Lifecycle
-	Config    *config.ProcessConfig
+	Config    *runtimeconfig.ProcessConfig
 	Logger    *slog.Logger
 }
 

@@ -3,95 +3,55 @@ package hostbus
 import (
 	"context"
 	"errors"
-	"net/url"
-	"sync"
-	"time"
+
+	runtimehostbus "github.com/openai/tunnel-client/pkg/runtimeharpoon/hostbus"
 )
 
-// URLBundle captures a set of URLs discovered by any component. It keeps
-// transport hints generic and intentionally avoids OAuth-specific fields.
-type URLBundle struct {
-	FetchedAt time.Time
-	URLs      []URLRecord
-}
-
-// URLRecord describes a single URL plus optional metadata tags.
-type URLRecord struct {
-	URL            *url.URL
-	Description    string
-	Tags           []Tag
-	UnixSocketPath string
-
-	// DisallowPrivateHostRegistration prevents this record from being admitted
-	// as a private-host target or seeding OAuth protected-resource host policy.
-	// An exact trusted protected-resource origin may still admit the record.
-	DisallowPrivateHostRegistration bool
-}
-
-// TagKey identifies a URL tag category.
-type TagKey int
+// Full-client Harpoon keeps these aliases for source compatibility while the
+// runtime-owned bus lives in runtimeharpoon.
+type URLBundle = runtimehostbus.URLBundle
+type URLRecord = runtimehostbus.URLRecord
+type TagKey = runtimehostbus.TagKey
+type Tag = runtimehostbus.Tag
+type HostRegistrationBus = runtimehostbus.HostRegistrationBus
 
 const (
-	TagKeyUnspecified TagKey = iota
-	TagKeySource
-	TagKeyRole
-	TagKeyIndex
-	TagKeyGroup
+	TagKeyUnspecified = runtimehostbus.TagKeyUnspecified
+	TagKeySource      = runtimehostbus.TagKeySource
+	TagKeyRole        = runtimehostbus.TagKeyRole
+	TagKeyIndex       = runtimehostbus.TagKeyIndex
+	TagKeyGroup       = runtimehostbus.TagKeyGroup
 )
 
-// Tag associates a tag key with a value.
-type Tag struct {
-	Key   TagKey
-	Value string
-}
-
-// HostRegistrationBus is the public interface for publishing URL bundles.
-// Implementations are package-private to prevent external construction.
-type HostRegistrationBus interface {
-	Publish(ctx context.Context, bundle URLBundle) error
-	Close() error
-}
-
-// hostRegistrationBus is a single-subscriber bus for URL bundles.
+// hostRegistrationBus is a thin full-client adapter around the runtime-owned
+// implementation. Keeping the wrapper preserves package-private zero-value
+// behavior relied on by existing full-client tests without duplicating the
+// runtime bus implementation.
 type hostRegistrationBus struct {
-	subscriber chan URLBundle
-	done       chan struct{}
-	once       sync.Once
+	inner HostRegistrationBus
 }
 
-// New constructs a new host registration bus with the provided subscriber channel.
+// New constructs the full-client compatibility adapter.
 func New(subscriber chan URLBundle) (HostRegistrationBus, error) {
-	if subscriber == nil {
-		return nil, errors.New("hostbus: subscriber channel is required")
+	inner, err := runtimehostbus.New(subscriber)
+	if err != nil {
+		return nil, err
 	}
-	return &hostRegistrationBus{subscriber: subscriber, done: make(chan struct{})}, nil
+	return &hostRegistrationBus{inner: inner}, nil
 }
 
-// Publish delivers a bundle to the configured subscriber. It blocks until
-// delivered or ctx is canceled.
 func (b *hostRegistrationBus) Publish(ctx context.Context, bundle URLBundle) error {
-	if b == nil || b.subscriber == nil {
+	if b == nil || b.inner == nil {
 		return errors.New("hostbus: subscriber channel is required")
 	}
-	select {
-	case <-b.done:
-		return errors.New("hostbus: closed")
-	case <-ctx.Done():
-		return ctx.Err()
-	case b.subscriber <- bundle:
-		return nil
-	}
+	return b.inner.Publish(ctx, bundle)
 }
 
-// Close signals publishers to stop waiting for delivery.
 func (b *hostRegistrationBus) Close() error {
-	if b == nil {
+	if b == nil || b.inner == nil {
 		return nil
 	}
-	b.once.Do(func() {
-		close(b.done)
-	})
-	return nil
+	return b.inner.Close()
 }
 
 var _ HostRegistrationBus = (*hostRegistrationBus)(nil)

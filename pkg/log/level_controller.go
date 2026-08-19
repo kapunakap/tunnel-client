@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
 var supportedRuntimeLogLevels = []string{"debug", "info", "warn"}
@@ -15,8 +15,8 @@ type LevelController struct {
 	levelVar *slog.LevelVar
 }
 
-// NewLevelController initializes a mutable level controller from the startup config.
-func NewLevelController(cfg *config.LoggingConfig) (*LevelController, error) {
+// NewLevelController initializes a mutable level controller from the startup runtimeconfig.
+func NewLevelController(cfg *runtimeconfig.LoggingConfig) (*LevelController, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("logging config is nil")
 	}

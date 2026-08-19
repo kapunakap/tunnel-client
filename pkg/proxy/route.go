@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
 // RouteKind describes the type of outbound route.
@@ -35,7 +35,7 @@ type Route struct {
 	TargetURL       *url.URL
 	TargetHostPort  string
 	ProxyURL        *url.URL
-	ProxySource     config.ProxySource
+	ProxySource     runtimeconfig.ProxySource
 	RouteMode       RouteMode
 	ProxyID         string
 	ProxyURLRedact  string
@@ -62,7 +62,7 @@ type IdentityRecord struct {
 }
 
 // ResolveRoute determines the effective proxy route metadata.
-func ResolveRoute(kind RouteKind, name string, target *url.URL, proxyURL *url.URL, proxySource config.ProxySource, lookupEnv func(string) (string, bool)) Route {
+func ResolveRoute(kind RouteKind, name string, target *url.URL, proxyURL *url.URL, proxySource runtimeconfig.ProxySource, lookupEnv func(string) (string, bool)) Route {
 	resolvedProxy := proxyURL
 	resolvedSource := proxySource
 	if resolvedProxy == nil {
@@ -87,7 +87,7 @@ func ResolveRoute(kind RouteKind, name string, target *url.URL, proxyURL *url.UR
 	}
 
 	if resolvedProxy == nil {
-		resolvedSource = config.ProxySourceNone
+		resolvedSource = runtimeconfig.ProxySourceNone
 	}
 
 	return Route{
@@ -186,25 +186,25 @@ func HostPortForURL(target *url.URL) string {
 	}
 }
 
-func envProxyForURL(target *url.URL, lookupEnv func(string) (string, bool)) (*url.URL, config.ProxySource) {
+func envProxyForURL(target *url.URL, lookupEnv func(string) (string, bool)) (*url.URL, runtimeconfig.ProxySource) {
 	if target == nil || lookupEnv == nil {
-		return nil, config.ProxySourceNone
+		return nil, runtimeconfig.ProxySourceNone
 	}
 	proxyValue, sourceVar := envProxyValue(target.Scheme, lookupEnv)
 	if proxyValue == "" {
-		return nil, config.ProxySourceNone
+		return nil, runtimeconfig.ProxySourceNone
 	}
 	if proxyBypassHost(firstEnvValue(lookupEnv, "NO_PROXY", "no_proxy"), target) {
-		return nil, config.ProxySourceNone
+		return nil, runtimeconfig.ProxySourceNone
 	}
 	proxyURL, err := parseProxyURL(proxyValue)
 	if err != nil {
-		return nil, config.ProxySourceNone
+		return nil, runtimeconfig.ProxySourceNone
 	}
 	if sourceVar == "" {
-		return proxyURL, config.ProxySourceEnvironment
+		return proxyURL, runtimeconfig.ProxySourceEnvironment
 	}
-	return proxyURL, config.ProxySource("env:" + sourceVar)
+	return proxyURL, runtimeconfig.ProxySource("env:" + sourceVar)
 }
 
 func firstEnvValue(lookupEnv func(string) (string, bool), keys ...string) string {

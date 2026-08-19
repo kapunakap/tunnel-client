@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/openai/tunnel-client/pkg/cloudflared"
+	"github.com/openai/tunnel-client/pkg/cloudflared/configgen"
 )
 
 func newCloudflaredCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
@@ -39,14 +40,14 @@ func newCloudflaredCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 }
 
 func newCloudflaredConfigCommand() *cobra.Command {
-	cfg := cloudflared.DefaultStandaloneConfig("")
+	cfg := configgen.DefaultStandaloneConfig("")
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Print a token-free production cloudflared config",
 		Long:  "Print a production-ready cloudflared YAML config for operators who run cloudflared directly without tunnel-client. The output references a token file path but never reads or embeds the token.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rendered, err := cloudflared.RenderStandaloneConfig(cfg)
+			rendered, err := configgen.RenderStandaloneConfig(cfg)
 			if err != nil {
 				return err
 			}

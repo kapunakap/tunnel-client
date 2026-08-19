@@ -119,10 +119,11 @@ func runOAuthMetadataDiscoveryPass(
 		req.Header.Set("User-Agent", version.UserAgent)
 
 		var resp *http.Response
+		discoveryClient := withSameOriginRedirects(client, candidate.URL)
 		if retryMode == discoveryRetryModeTimeoutBackoff {
-			resp, err = doWithRetryForTimeout(ctx, client, req, logger)
+			resp, err = doWithRetryForTimeout(ctx, discoveryClient, req, logger)
 		} else {
-			resp, err = client.Do(req)
+			resp, err = discoveryClient.Do(req)
 		}
 		if err != nil {
 			lastErr = wrapErrorWithRedactedMessage(
@@ -212,6 +213,32 @@ func runOAuthMetadataDiscoveryPass(
 	}
 
 	return nil, nil, failureType, lastErr
+}
+
+// withSameOriginRedirects returns a shallow client copy that preserves the
+// caller's transport, cookies, timeout, and existing redirect policy while
+// preventing OAuth discovery from following a redirect to another authority.
+// Discovery candidates are either configured-server well-known URLs or
+// same-origin header-derived URLs; redirects must not widen either boundary.
+func withSameOriginRedirects(client *http.Client, origin *url.URL) *http.Client {
+	if client == nil {
+		return nil
+	}
+	cloned := *client
+	priorPolicy := client.CheckRedirect
+	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req == nil || !sameURLOrigin(req.URL, origin) {
+			return fmt.Errorf("oauth discovery: redirect blocked: destination must use the discovery origin")
+		}
+		if priorPolicy != nil {
+			return priorPolicy(req, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("oauth discovery: stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &cloned
 }
 
 func doWithRetryForTimeout(

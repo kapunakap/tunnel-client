@@ -130,15 +130,8 @@ func TestFindGitRootByWalkingParentsStopsAtRoot(t *testing.T) {
 	}
 }
 
-func TestInitVersionUpdatesGlobals(t *testing.T) {
-	originalSemanticVersion := semanticVersion
-	originalSourceSemanticVersion := sourceSemanticVersion
-	originalUserAgentPrefix := userAgentPrefix
-	originalDetectCheckoutGitSHA := detectCheckoutGitSHA
-	originalGitSHA := GitSHA
-	originalSemanticVersionGlobal := SemanticVersion
-	originalVersion := Version
-	originalUserAgent := UserAgent
+func TestInitVersionUpdatesStaticBuildMetadata(t *testing.T) {
+	restoreVersionGlobals(t)
 
 	semanticVersion = "1.2.3"
 	userAgentPrefix = "oai-tunnel-client/"
@@ -148,20 +141,12 @@ func TestInitVersionUpdatesGlobals(t *testing.T) {
 		return "checkout-sha"
 	}
 	GitSHA = ""
+	GoVersion = "go1.26.2"
+	BuildFlags = "-trimpath -buildvcs=false"
+	Flavor = FlavorRuntime
 	SemanticVersion = ""
 	Version = ""
 	UserAgent = ""
-
-	t.Cleanup(func() {
-		semanticVersion = originalSemanticVersion
-		sourceSemanticVersion = originalSourceSemanticVersion
-		userAgentPrefix = originalUserAgentPrefix
-		detectCheckoutGitSHA = originalDetectCheckoutGitSHA
-		GitSHA = originalGitSHA
-		SemanticVersion = originalSemanticVersionGlobal
-		Version = originalVersion
-		UserAgent = originalUserAgent
-	})
 
 	readBuildInfo := func() (*debug.BuildInfo, bool) {
 		return &debug.BuildInfo{
@@ -172,7 +157,7 @@ func TestInitVersionUpdatesGlobals(t *testing.T) {
 	initVersion(readBuildInfo)
 
 	if GitSHA != "deadbeef" {
-		t.Fatalf("expected GitSHA to be set, got %q", GitSHA)
+		t.Fatalf("expected GitSHA to be set from static build info, got %q", GitSHA)
 	}
 	if checkoutCalled {
 		t.Fatal("expected build info sha to win over checkout detection")
@@ -189,134 +174,107 @@ func TestInitVersionUpdatesGlobals(t *testing.T) {
 	if UserAgent != "oai-tunnel-client/1.2.3+deadbeef" {
 		t.Fatalf("expected UserAgent to include version, got %q", UserAgent)
 	}
+
+	metadata := CurrentBuildMetadata()
+	if metadata.Flavor != FlavorRuntime {
+		t.Fatalf("expected linked runtime flavor, got %q", metadata.Flavor)
+	}
+	if metadata.GoVersion != "go1.26.2" {
+		t.Fatalf("expected linked Go version, got %q", metadata.GoVersion)
+	}
+	if metadata.BuildFlags != "-trimpath -buildvcs=false" {
+		t.Fatalf("expected linked build flags, got %q", metadata.BuildFlags)
+	}
 }
 
-func TestInitVersionPreservesInjectedGitSHA(t *testing.T) {
-	originalSemanticVersion := semanticVersion
-	originalSourceSemanticVersion := sourceSemanticVersion
-	originalUserAgentPrefix := userAgentPrefix
-	originalDetectCheckoutGitSHA := detectCheckoutGitSHA
-	originalGitSHA := GitSHA
-	originalSemanticVersionGlobal := SemanticVersion
-	originalVersion := Version
-	originalUserAgent := UserAgent
+func TestInitVersionPreservesLinkedGitSHA(t *testing.T) {
+	restoreVersionGlobals(t)
 
 	semanticVersion = "1.2.3"
-	userAgentPrefix = "oai-tunnel-client/"
-	detectCheckoutGitSHA = func() string {
-		t.Fatal("checkout detection should not run for injected GitSHA")
-		return ""
-	}
-	GitSHA = "injected-sha"
+	GitSHA = "linked-sha"
+	GoVersion = "go1.26.2"
+	Flavor = FlavorRuntimeCloudflared
 	SemanticVersion = ""
 	Version = ""
 	UserAgent = ""
 
-	t.Cleanup(func() {
-		semanticVersion = originalSemanticVersion
-		sourceSemanticVersion = originalSourceSemanticVersion
-		userAgentPrefix = originalUserAgentPrefix
-		detectCheckoutGitSHA = originalDetectCheckoutGitSHA
-		GitSHA = originalGitSHA
-		SemanticVersion = originalSemanticVersionGlobal
-		Version = originalVersion
-		UserAgent = originalUserAgent
+	initVersion(func() (*debug.BuildInfo, bool) {
+		return &debug.BuildInfo{
+			Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "build-info-sha"}},
+		}, true
 	})
 
-	readBuildInfo := func() (*debug.BuildInfo, bool) {
-		t.Fatal("build info should not be read for injected GitSHA")
-		return nil, false
+	if GitSHA != "linked-sha" {
+		t.Fatalf("expected linked GitSHA to win, got %q", GitSHA)
 	}
-
-	initVersion(readBuildInfo)
-
-	if GitSHA != "injected-sha" {
-		t.Fatalf("expected injected GitSHA to be preserved, got %q", GitSHA)
-	}
-	if Version != "1.2.3+injected-sha" {
-		t.Fatalf("expected Version to include injected sha, got %q", Version)
+	if metadata := CurrentBuildMetadata(); metadata.Flavor != FlavorRuntimeCloudflared {
+		t.Fatalf("expected linked cloudflared runtime flavor, got %q", metadata.Flavor)
 	}
 }
 
-func TestInitVersionFallsBackToCheckoutGitSHA(t *testing.T) {
-	originalSemanticVersion := semanticVersion
-	originalSourceSemanticVersion := sourceSemanticVersion
-	originalUserAgentPrefix := userAgentPrefix
-	originalDetectCheckoutGitSHA := detectCheckoutGitSHA
-	originalGitSHA := GitSHA
-	originalSemanticVersionGlobal := SemanticVersion
-	originalVersion := Version
-	originalUserAgent := UserAgent
+func TestInitVersionFallsBackToCheckoutGitSHAForFullFlavor(t *testing.T) {
+	restoreVersionGlobals(t)
 
 	semanticVersion = "1.2.3"
-	userAgentPrefix = "oai-tunnel-client/"
-	detectCheckoutGitSHA = func() string {
-		return "checkout-sha"
-	}
 	GitSHA = ""
+	GoVersion = "go1.26.2"
+	Flavor = FlavorFull
 	SemanticVersion = ""
 	Version = ""
 	UserAgent = ""
+	detectCheckoutGitSHA = func() string { return "checkout-sha" }
 
-	t.Cleanup(func() {
-		semanticVersion = originalSemanticVersion
-		sourceSemanticVersion = originalSourceSemanticVersion
-		userAgentPrefix = originalUserAgentPrefix
-		detectCheckoutGitSHA = originalDetectCheckoutGitSHA
-		GitSHA = originalGitSHA
-		SemanticVersion = originalSemanticVersionGlobal
-		Version = originalVersion
-		UserAgent = originalUserAgent
-	})
-
-	emptyRead := func() (*debug.BuildInfo, bool) { return nil, false }
-
-	initVersion(emptyRead)
+	initVersion(func() (*debug.BuildInfo, bool) { return nil, false })
 
 	if GitSHA != "checkout-sha" {
-		t.Fatalf("expected checkout GitSHA fallback, got %q", GitSHA)
+		t.Fatalf("expected full flavor to use checkout sha, got %q", GitSHA)
 	}
 	if Version != "1.2.3+checkout-sha" {
 		t.Fatalf("expected Version to include checkout sha, got %q", Version)
 	}
-	if UserAgent != "oai-tunnel-client/1.2.3+checkout-sha" {
-		t.Fatalf("expected UserAgent to include checkout sha, got %q", UserAgent)
+}
+
+func TestInitVersionSkipsCheckoutGitSHAForRuntimeFlavor(t *testing.T) {
+	restoreVersionGlobals(t)
+
+	semanticVersion = "1.2.3"
+	GitSHA = ""
+	GoVersion = "go1.26.2"
+	Flavor = FlavorRuntime
+	SemanticVersion = ""
+	Version = ""
+	UserAgent = ""
+	detectCheckoutGitSHA = func() string {
+		t.Fatal("runtime flavor must not probe checkout metadata")
+		return ""
+	}
+
+	initVersion(func() (*debug.BuildInfo, bool) { return nil, false })
+
+	if GitSHA != "" {
+		t.Fatalf("expected runtime flavor without linked SHA to stay empty, got %q", GitSHA)
+	}
+	if Version != "1.2.3" {
+		t.Fatalf("expected runtime version without SHA metadata, got %q", Version)
 	}
 }
 
-func TestInitVersionUsesSourceVersionWhenBuildVersionIsFallback(t *testing.T) {
-	originalSemanticVersion := semanticVersion
-	originalSourceSemanticVersion := sourceSemanticVersion
-	originalUserAgentPrefix := userAgentPrefix
-	originalDetectCheckoutGitSHA := detectCheckoutGitSHA
-	originalGitSHA := GitSHA
-	originalSemanticVersionGlobal := SemanticVersion
-	originalVersion := Version
-	originalUserAgent := UserAgent
+func TestInitVersionUsesSourceVersionAndStaticDefaults(t *testing.T) {
+	restoreVersionGlobals(t)
 
 	semanticVersion = fallbackSemanticVersion
 	sourceSemanticVersion = "4.5.6\n"
 	userAgentPrefix = "oai-tunnel-client/"
-	detectCheckoutGitSHA = func() string { return "" }
 	GitSHA = ""
+	GoVersion = ""
+	BuildFlags = ""
+	Flavor = ""
 	SemanticVersion = ""
 	Version = ""
 	UserAgent = ""
+	detectCheckoutGitSHA = func() string { return "" }
 
-	t.Cleanup(func() {
-		semanticVersion = originalSemanticVersion
-		sourceSemanticVersion = originalSourceSemanticVersion
-		userAgentPrefix = originalUserAgentPrefix
-		detectCheckoutGitSHA = originalDetectCheckoutGitSHA
-		GitSHA = originalGitSHA
-		SemanticVersion = originalSemanticVersionGlobal
-		Version = originalVersion
-		UserAgent = originalUserAgent
-	})
-
-	emptyRead := func() (*debug.BuildInfo, bool) { return nil, false }
-
-	initVersion(emptyRead)
+	initVersion(func() (*debug.BuildInfo, bool) { return nil, false })
 
 	if SemanticVersion != "4.5.6" {
 		t.Fatalf("expected SemanticVersion from source VERSION, got %q", SemanticVersion)
@@ -327,6 +285,43 @@ func TestInitVersionUsesSourceVersionWhenBuildVersionIsFallback(t *testing.T) {
 	if UserAgent != "oai-tunnel-client/4.5.6" {
 		t.Fatalf("expected UserAgent from source VERSION, got %q", UserAgent)
 	}
+	metadata := CurrentBuildMetadata()
+	if metadata.Flavor != FlavorFull {
+		t.Fatalf("expected default full flavor, got %q", metadata.Flavor)
+	}
+	if metadata.GoVersion == "" {
+		t.Fatal("expected compiled Go version fallback")
+	}
+}
+
+func restoreVersionGlobals(t *testing.T) {
+	t.Helper()
+
+	originalSemanticVersion := semanticVersion
+	originalSourceSemanticVersion := sourceSemanticVersion
+	originalUserAgentPrefix := userAgentPrefix
+	originalDetectCheckoutGitSHA := detectCheckoutGitSHA
+	originalGitSHA := GitSHA
+	originalGoVersion := GoVersion
+	originalBuildFlags := BuildFlags
+	originalFlavor := Flavor
+	originalSemanticVersionGlobal := SemanticVersion
+	originalVersion := Version
+	originalUserAgent := UserAgent
+
+	t.Cleanup(func() {
+		semanticVersion = originalSemanticVersion
+		sourceSemanticVersion = originalSourceSemanticVersion
+		userAgentPrefix = originalUserAgentPrefix
+		detectCheckoutGitSHA = originalDetectCheckoutGitSHA
+		GitSHA = originalGitSHA
+		GoVersion = originalGoVersion
+		BuildFlags = originalBuildFlags
+		Flavor = originalFlavor
+		SemanticVersion = originalSemanticVersionGlobal
+		Version = originalVersion
+		UserAgent = originalUserAgent
+	})
 }
 
 func newTunnelClientCheckout(t *testing.T, nestedModule bool) (string, string) {

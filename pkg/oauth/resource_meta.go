@@ -208,7 +208,7 @@ func tryWWWAuthenticateProbe(
 	req.Header.Set("User-Agent", version.UserAgent)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := withSameOriginRedirects(client, serverURL).Do(req)
 	if err != nil {
 		if logger != nil {
 			logger.WarnContext(ctx, "oauth discovery WWW-Authenticate probe failed", slog.String("method", method), slog.String("error", tclog.ErrorForLog(err)))
@@ -236,7 +236,6 @@ func tryWWWAuthenticateProbe(
 			err,
 		)
 	}
-
 	return parsed, nil
 }
 

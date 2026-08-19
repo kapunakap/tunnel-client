@@ -16,8 +16,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
-	"github.com/openai/tunnel-client/pkg/harpoon/hostbus"
 	tclog "github.com/openai/tunnel-client/pkg/log"
+	"github.com/openai/tunnel-client/pkg/runtimeharpoon/hostbus"
 )
 
 // URLBundleOptions carries optional transport hints and trust context for

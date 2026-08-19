@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/openai/tunnel-client/pkg/config"
-	"github.com/openai/tunnel-client/pkg/harpoon/internal/hostclassifier"
 	"github.com/openai/tunnel-client/pkg/oauth"
+	"github.com/openai/tunnel-client/pkg/runtimeharpoon"
 	"github.com/openai/tunnel-client/pkg/transport"
 	"github.com/openai/tunnel-client/pkg/version"
 )
@@ -430,11 +430,11 @@ func TestCallTargetUsesDiscoveredOAuthUnixSocket(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry, err := NewRegistry(logger, true, nil)
 	require.NoError(t, err)
-	classifier := hostclassifier.NewHostClassifier(config.HarpoonHostClassifierConfig{
+	classifierConfig := config.HarpoonHostClassifierConfig{
 		IncludeLoopback: true,
 		IncludePrivate:  false,
-	})
-	require.NoError(t, registerHostBundle(bundle, classifier, registry, logger))
+	}
+	require.NoError(t, runtimeharpoon.RegisterHostBundleForConfig(bundle, classifierConfig, registry, logger))
 	for _, label := range []string{
 		"oauth-auth-server-metadata-0",
 		"oauth-registration-endpoint-0",
@@ -495,7 +495,7 @@ func TestCallTargetSelectsTransportPerRedirectedTarget(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "unix", decodeBody(t, resp.BodyBase64))
 		}
-		require.Len(t, client.unixBySocket, 1)
+		require.Equal(t, 1, client.unixTransportCount())
 	})
 
 	t.Run("UnixSocketToHTTP", func(t *testing.T) {
@@ -530,7 +530,7 @@ func TestCallTargetSelectsTransportPerRedirectedTarget(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "http", decodeBody(t, resp.BodyBase64))
 		}
-		require.Len(t, client.unixBySocket, 1)
+		require.Equal(t, 1, client.unixTransportCount())
 	})
 }
 

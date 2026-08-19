@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func selectedAuthServerMetadataAttempt(t *testing.T, attempts []AuthServerMetadataAttempt) AuthServerMetadataAttempt {
@@ -136,6 +138,28 @@ func TestFetchAuthServerMetadataFallsBackToOIDCWellKnown(t *testing.T) {
 	if meta.Issuer != server.URL {
 		t.Fatalf("issuer mismatch: got %q want %q", meta.Issuer, server.URL)
 	}
+}
+
+func TestFetchAuthServerMetadataRejectsCrossOriginRedirectBeforeDial(t *testing.T) {
+	t.Parallel()
+
+	attackerHits := 0
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attackerHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"issuer":"https://attacker.invalid"}`))
+	}))
+	t.Cleanup(attacker.Close)
+
+	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL+"/metadata", http.StatusFound)
+	}))
+	t.Cleanup(issuer.Close)
+
+	_, _, err := FetchAuthServerMetadataWithResult(context.Background(), issuer.Client(), issuer.URL)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "redirect blocked")
+	require.Zero(t, attackerHits)
 }
 
 func TestFetchAuthServerMetadataSupportsAppendStyleOIDCPath(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
 )
 
@@ -28,8 +29,8 @@ type AdminConfig struct {
 
 // RegisterAdminFlags attaches admin/tunnel-management flags to the provided flag set.
 func RegisterAdminFlags(fs *pflag.FlagSet) {
-	registerTLSFlags(fs)
-	fs.String("control-plane.base-url", defaultControlPlaneBaseURL, "Tunnel control-plane base URL (env.CONTROL_PLANE_BASE_URL)")
+	runtimeconfig.RegisterTLSFlags(fs)
+	fs.String("control-plane.base-url", runtimeconfig.DefaultControlPlaneBaseURL, "Tunnel control-plane base URL (env.CONTROL_PLANE_BASE_URL)")
 	fs.String("control-plane.url-path", "", "Optional URL path appended to the control-plane base URL (env.CONTROL_PLANE_URL_PATH)")
 	fs.String("admin-key", "", "Admin API key for tunnel management (env.OPENAI_ADMIN_KEY)")
 	fs.Bool("json", false, "Output JSON instead of text")
@@ -46,18 +47,18 @@ func LoadAdminConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, bool)) (
 
 	baseURLRaw := firstSet(
 		getValue(fs, "control-plane.base-url"),
-		envOrDefault(lookupEnv, "CONTROL_PLANE_BASE_URL", defaultControlPlaneBaseURL),
+		envOrDefault(lookupEnv, "CONTROL_PLANE_BASE_URL", runtimeconfig.DefaultControlPlaneBaseURL),
 	)
-	baseURL, err := parseURL(baseURLRaw)
+	baseURL, err := runtimeconfig.ParseURL(baseURLRaw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid control-plane.base-url: %w", err)
 	}
-	controlPlaneURLPath, err := NormalizeControlPlaneURLPath(controlPlaneURLPathRaw(fs, lookupEnv))
+	controlPlaneURLPath, err := NormalizeControlPlaneURLPath(runtimeconfig.ControlPlaneURLPathRaw(fs, lookupEnv))
 	if err != nil {
 		return nil, err
 	}
 
-	tlsBundle, err := buildTLSBundle(fs, lookupEnv)
+	tlsBundle, err := runtimeconfig.BuildTLSBundle(fs, lookupEnv)
 	if err != nil {
 		return nil, err
 	}

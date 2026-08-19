@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+flavor="${1:-client}"
+case "${flavor}" in
+  client|runtime|runtime-cloudflared) ;;
+  *)
+    echo "usage: sbom_baseline_check_test.sh [client|runtime|runtime-cloudflared]" >&2
+    exit 1
+    ;;
+esac
+
 bootstrap_resolve_runfile() {
   local logical_path="$1"
   local manifest="${RUNFILES_MANIFEST_FILE:-${TEST_SRCDIR:-}/MANIFEST}"
@@ -35,9 +44,15 @@ runfiles_helper="$(bootstrap_resolve_runfile "${TUNNEL_CLIENT_SBOM_RUNFILES_RUNF
 source "${runfiles_helper}"
 
 sbom_require_bazel_test_runfiles
-source_root="${TEST_TMPDIR}/client-source"
+source_root="${TEST_TMPDIR}/${flavor}-source"
 cloudflared_extract_root="${TEST_TMPDIR}/cloudflared-source"
 generated_root="${TEST_TMPDIR}/generated"
+output_name=""
+case "${flavor}" in
+  client) output_name="tunnel-client.spdx.json" ;;
+  runtime) output_name="tunnel-client-runtime.spdx.json" ;;
+  runtime-cloudflared) output_name="tunnel-client-runtime-cloudflared.spdx.json" ;;
+esac
 export HOME="${TEST_TMPDIR}/home"
 export TMPDIR="${TEST_TMPDIR}/tmp"
 export GOTMPDIR="${TEST_TMPDIR}/tmp"
@@ -82,18 +97,34 @@ syft="$(sbom_resolve_runfile "${TUNNEL_CLIENT_SYFT_RUNFILE:-}")"
 syft_lock="$(sbom_resolve_runfile "${TUNNEL_CLIENT_SYFT_LOCK_RUNFILE:-}")"
 expected="$(sbom_resolve_runfile "${TUNNEL_CLIENT_SBOM_BASELINE_RUNFILE:-}")"
 
-"${generator}" \
-  --source-root "${source_root}" \
-  --cloudflared-source "${cloudflared_source}" \
-  --go "${SBOM_GO_BIN}" \
-  --python "${python_bin}" \
-  --source-preparer "${source_preparer}" \
-  --oai-sbom "${oai_sbom}" \
-  --syft "${syft}" \
-  --syft-lock "${syft_lock}" \
-  --output "${generated_root}/tunnel-client.spdx.json"
+generator_args=(
+  --flavor "${flavor}"
+  --source-root "${source_root}"
+  --cloudflared-source "${cloudflared_source}"
+  --go "${SBOM_GO_BIN}"
+  --python "${python_bin}"
+  --source-preparer "${source_preparer}"
+  --oai-sbom "${oai_sbom}"
+  --syft "${syft}"
+  --syft-lock "${syft_lock}"
+  --output "${generated_root}/${output_name}"
+)
+if [[ "${flavor}" != "client" ]]; then
+  license_report_builder="$(sbom_resolve_runfile "${TUNNEL_CLIENT_LICENSE_REPORT_BUILDER_RUNFILE:-}")"
+  base_license_report="$(sbom_resolve_runfile "${TUNNEL_CLIENT_BASE_LICENSE_REPORT_RUNFILE:-}")"
+  generator_args+=(
+    --license-report-builder "${license_report_builder}"
+    --base-license-report "${base_license_report}"
+  )
+  if [[ "${flavor}" == "runtime-cloudflared" ]]; then
+    companion_license_report="$(sbom_resolve_runfile "${TUNNEL_CLIENT_COMPANION_LICENSE_REPORT_RUNFILE:-}")"
+    generator_args+=(--companion-license-report "${companion_license_report}")
+  fi
+fi
 
-if ! diff -u "${expected}" "${generated_root}/tunnel-client.spdx.json"; then
-  echo "tunnel-client SBOM baseline is stale" >&2
+"${generator}" "${generator_args[@]}"
+
+if ! diff -u "${expected}" "${generated_root}/${output_name}"; then
+  echo "${flavor} SBOM baseline is stale" >&2
   exit 1
 fi

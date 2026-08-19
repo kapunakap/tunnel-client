@@ -63,6 +63,37 @@ func TestFetchOAuthMetadataNoURLs(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestFetchOAuthMetadataRejectsCrossOriginRedirectBeforeDial(t *testing.T) {
+	t.Parallel()
+
+	attackerHits := 0
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attackerHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"resource":"https://attacker.invalid/mcp"}`))
+	}))
+	t.Cleanup(attacker.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL+"/metadata", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+	candidateURL, err := url.Parse(origin.URL + "/.well-known/oauth-protected-resource")
+	require.NoError(t, err)
+
+	_, _, attempts, fetchErr := FetchOAuthMetadata(
+		context.Background(),
+		origin.Client(),
+		[]DiscoveryCandidate{{URL: candidateURL, Source: DiscoverySourceWellKnownRoot}},
+		testLogger(),
+	)
+	require.Error(t, fetchErr)
+	require.Contains(t, fetchErr.Error(), "redirect blocked")
+	require.Len(t, attempts, 1)
+	require.Contains(t, attempts[0].Error, "redirect blocked")
+	require.Zero(t, attackerHits)
+}
+
 func TestFetchOAuthMetadataRedactsCandidateURLFromLogsAndErrors(t *testing.T) {
 	candidateURL, err := url.Parse(
 		"https://userinfo-value:credential-value@auth.internal/token-path-value?client_id=query-value#state=fragment-value",

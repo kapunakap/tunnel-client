@@ -11,9 +11,9 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	tclog "github.com/openai/tunnel-client/pkg/log"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"github.com/openai/tunnel-client/pkg/tunnelctx"
 )
 
@@ -102,7 +102,7 @@ func newQueueListenerMetrics(meter metric.Meter, pool workerPool) (*queueListene
 type poolFactory func(maxConcurrent int) (workerPool, error)
 
 // NewQueueListener constructs a QueueListener with a worker pool sized according to the MCP configuration.
-func NewQueueListener(logger *slog.Logger, processor Processor, queue controlplane.PolledCommandQueue, mcpConfig *config.MCPConfig, meterProvider *sdkmetric.MeterProvider) (*QueueListener, error) {
+func NewQueueListener(logger *slog.Logger, processor Processor, queue controlplane.PolledCommandQueue, mcpConfig *runtimeconfig.MCPConfig, meterProvider *sdkmetric.MeterProvider) (*QueueListener, error) {
 	return newQueueListener(logger, processor, queue, mcpConfig, meterProvider, func(maxConcurrent int) (workerPool, error) {
 		pool, err := ants.NewPool(maxConcurrent)
 		if err != nil {
@@ -112,7 +112,7 @@ func NewQueueListener(logger *slog.Logger, processor Processor, queue controlpla
 	})
 }
 
-func newQueueListener(logger *slog.Logger, processor Processor, queue controlplane.PolledCommandQueue, mcpConfig *config.MCPConfig, meterProvider *sdkmetric.MeterProvider, makePool poolFactory) (*QueueListener, error) {
+func newQueueListener(logger *slog.Logger, processor Processor, queue controlplane.PolledCommandQueue, mcpConfig *runtimeconfig.MCPConfig, meterProvider *sdkmetric.MeterProvider, makePool poolFactory) (*QueueListener, error) {
 	if logger == nil {
 		return nil, fmt.Errorf("dispatcher queue listener: nil logger")
 	}

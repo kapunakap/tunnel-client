@@ -19,12 +19,12 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/fx"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
-	"github.com/openai/tunnel-client/pkg/harpoon/hostbus"
 	tclog "github.com/openai/tunnel-client/pkg/log"
 	"github.com/openai/tunnel-client/pkg/mcpclient"
 	"github.com/openai/tunnel-client/pkg/oauth"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
+	"github.com/openai/tunnel-client/pkg/runtimeharpoon/hostbus"
 	"github.com/openai/tunnel-client/pkg/tunnelctx"
 	"github.com/openai/tunnel-client/pkg/types"
 )
@@ -65,10 +65,10 @@ type processorParams struct {
 	Logger          *slog.Logger
 	ChannelBindings map[types.Channel]ChannelBinding `optional:"true"`
 	TunnelResponder controlplane.Responder
-	MCPConfig       *config.MCPConfig
+	MCPConfig       *runtimeconfig.MCPConfig
 	OAuthHTTPClient *http.Client                `name:"mcp_client"`
 	HostBus         hostbus.HostRegistrationBus `optional:"true"`
-	ControlPlaneCfg *config.ControlPlaneConfig
+	ControlPlaneCfg *runtimeconfig.ControlPlaneConfig
 	MeterProvider   *sdkmetric.MeterProvider
 }
 
@@ -134,7 +134,7 @@ func (c channelConfig) isRoutable() bool {
 	return c.routable()
 }
 
-func requiredProcessorChannels(cfg *config.ControlPlaneConfig) []types.Channel {
+func requiredProcessorChannels(cfg *runtimeconfig.ControlPlaneConfig) []types.Channel {
 	if cfg != nil && cfg.PollChannelsConfigured {
 		return cfg.PollChannels
 	}
@@ -203,9 +203,9 @@ func NewProcessor(p processorParams) (Processor, error) {
 
 	transportKind := p.MCPConfig.TransportKind
 	if transportKind == "" {
-		transportKind = config.MCPTransportHTTPStreamable
+		transportKind = runtimeconfig.MCPTransportHTTPStreamable
 	}
-	if transportKind == config.MCPTransportHTTPStreamable && p.MCPConfig.ServerURL == nil && (!p.ControlPlaneCfg.PollChannelsConfigured || containsChannel(p.ControlPlaneCfg.PollChannels, types.DefaultChannel)) {
+	if transportKind == runtimeconfig.MCPTransportHTTPStreamable && p.MCPConfig.ServerURL == nil && (!p.ControlPlaneCfg.PollChannelsConfigured || containsChannel(p.ControlPlaneCfg.PollChannels, types.DefaultChannel)) {
 		return nil, fmt.Errorf("dispatcher processor: missing MCP server URL")
 	}
 

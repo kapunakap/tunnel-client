@@ -14,6 +14,14 @@ const (
 	// ClientName identifies this binary in structured control-plane metadata.
 	ClientName              = "oai-tunnel-client"
 	fallbackSemanticVersion = "0.0.1"
+
+	// FlavorFull is the default build flavor for the existing complete client.
+	FlavorFull = "full"
+	// FlavorRuntime identifies the narrow runtime artifact without cloudflared.
+	FlavorRuntime = "runtime"
+	// FlavorRuntimeCloudflared identifies the narrow runtime artifact with the
+	// approved bundled cloudflared supervisor.
+	FlavorRuntimeCloudflared = "runtime-cloudflared"
 )
 
 var (
@@ -29,8 +37,20 @@ var (
 var sourceSemanticVersion string
 
 var (
-	// GitSHA is populated at build time via ldflags or Go build metadata.
+	// GitSHA is populated at build time via ldflags or static Go build metadata.
+	// Runtime artifacts never discover it from the checkout or start git.
 	GitSHA = ""
+	// GoVersion is populated at build time via ldflags. When a caller does not
+	// inject it, the compiled runtime version is used without starting another
+	// process.
+	GoVersion = ""
+	// BuildFlags is populated at build time via ldflags for release artifact
+	// receipts, for example "-trimpath -buildvcs=false".
+	BuildFlags = ""
+	// Flavor is populated at build time via ldflags. Existing full-client
+	// builds default to FlavorFull; runtime entrypoints link one of the narrow
+	// runtime flavor constants.
+	Flavor = FlavorFull
 	// SemanticVersion exposes the release version without build metadata.
 	SemanticVersion = semanticVersion
 	// Version exposes the semver plus build metadata when available.
@@ -46,16 +66,57 @@ func init() {
 type readBuildInfoFunc func() (*debug.BuildInfo, bool)
 
 func initVersion(readBuildInfo readBuildInfoFunc) {
+	flavor := effectiveFlavor()
 	if GitSHA == "" {
 		GitSHA = detectBuildGitSHAFrom(readBuildInfo)
 	}
-	if GitSHA == "" {
+	if GitSHA == "" && flavor == FlavorFull {
 		GitSHA = detectCheckoutGitSHA()
 	}
+	if GoVersion == "" {
+		GoVersion = runtime.Version()
+	}
+	Flavor = flavor
 	baseVersion := effectiveSemanticVersion()
 	SemanticVersion = baseVersion
 	Version = buildVersion(baseVersion, GitSHA)
 	UserAgent = userAgentPrefix + Version
+}
+
+// BuildMetadata is the static identity linked into a tunnel-client artifact.
+// Runtime entrypoints expose these values through their --version output.
+type BuildMetadata struct {
+	SemanticVersion string
+	Version         string
+	GitSHA          string
+	GoVersion       string
+	BuildFlags      string
+	Flavor          string
+}
+
+// CurrentBuildMetadata returns the artifact identity without starting
+// subprocesses.
+func CurrentBuildMetadata() BuildMetadata {
+	goVersion := strings.TrimSpace(GoVersion)
+	if goVersion == "" {
+		goVersion = runtime.Version()
+	}
+	return BuildMetadata{
+		SemanticVersion: strings.TrimSpace(SemanticVersion),
+		Version:         strings.TrimSpace(Version),
+		GitSHA:          strings.TrimSpace(GitSHA),
+		GoVersion:       goVersion,
+		BuildFlags:      strings.TrimSpace(BuildFlags),
+		Flavor:          effectiveFlavor(),
+	}
+}
+
+func effectiveFlavor() string {
+	flavor := strings.TrimSpace(Flavor)
+	if flavor == "" {
+		return FlavorFull
+	}
+	return flavor
 }
 
 func effectiveSemanticVersion() string {

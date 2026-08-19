@@ -11,11 +11,11 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/fx"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	dispatcherinternal "github.com/openai/tunnel-client/pkg/dispatcher/internal"
-	"github.com/openai/tunnel-client/pkg/harpoon"
 	"github.com/openai/tunnel-client/pkg/mcpclient"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
+	"github.com/openai/tunnel-client/pkg/runtimeharpoon"
 	"github.com/openai/tunnel-client/pkg/types"
 )
 
@@ -28,7 +28,7 @@ var legacyRequiredDispatcherChannels = []types.Channel{
 type Params struct {
 	fx.In
 
-	ControlPlane  *config.ControlPlaneConfig
+	ControlPlane  *runtimeconfig.ControlPlaneConfig
 	MeterProvider *sdkmetric.MeterProvider
 }
 
@@ -53,7 +53,7 @@ func newPolledCommandQueue(p Params) Result {
 type dispatcherChannelBinding struct {
 	Channel                    types.Channel
 	Priority                   int
-	TransportKind              config.MCPTransportKind
+	TransportKind              runtimeconfig.MCPTransportKind
 	Transport                  mcp.Transport
 	Routable                   func() bool
 	SupportsMCP                bool
@@ -84,7 +84,7 @@ type configuredChannelBindingsResult struct {
 	Bindings []dispatcherChannelBinding `group:"dispatcher_channel_bindings,flatten"`
 }
 
-func newConfiguredChannelBindings(cfg *config.MCPConfig, factory *mcpclient.ChannelTransportFactory) (configuredChannelBindingsResult, error) {
+func newConfiguredChannelBindings(cfg *runtimeconfig.MCPConfig, factory *mcpclient.ChannelTransportFactory) (configuredChannelBindingsResult, error) {
 	if cfg == nil {
 		return configuredChannelBindingsResult{}, fmt.Errorf("dispatcher: MCP config is required")
 	}
@@ -93,14 +93,14 @@ func newConfiguredChannelBindings(cfg *config.MCPConfig, factory *mcpclient.Chan
 	}
 	channelBindings := cfg.ChannelBindings
 	if len(channelBindings) == 0 && !cfg.AllowNoMain {
-		mainBinding := config.MCPChannelBinding{
+		mainBinding := runtimeconfig.MCPChannelBinding{
 			Channel:       types.DefaultChannel,
 			TransportKind: cfg.TransportKind,
 			ServerURL:     cfg.ServerURL,
 			Command:       cfg.Command,
 			CommandArgs:   cfg.CommandArgs,
 		}
-		channelBindings = []config.MCPChannelBinding{mainBinding}
+		channelBindings = []runtimeconfig.MCPChannelBinding{mainBinding}
 	}
 	bindings := make([]dispatcherChannelBinding, 0, len(channelBindings))
 	for _, binding := range channelBindings {
@@ -111,7 +111,7 @@ func newConfiguredChannelBindings(cfg *config.MCPConfig, factory *mcpclient.Chan
 		channelName := binding.Channel.Canonical()
 		transportKind := binding.TransportKind
 		if transportKind == "" {
-			transportKind = config.MCPTransportHTTPStreamable
+			transportKind = runtimeconfig.MCPTransportHTTPStreamable
 		}
 		bindings = append(bindings, dispatcherChannelBinding{
 			Channel:                    channelName,
@@ -120,7 +120,7 @@ func newConfiguredChannelBindings(cfg *config.MCPConfig, factory *mcpclient.Chan
 			Transport:                  transport,
 			SupportsMCP:                true,
 			SupportsOAuth:              channelName == types.DefaultChannel,
-			SupportsSessionTermination: transportKind == config.MCPTransportHTTPStreamable,
+			SupportsSessionTermination: transportKind == runtimeconfig.MCPTransportHTTPStreamable,
 		})
 	}
 	return configuredChannelBindingsResult{Bindings: bindings}, nil
@@ -129,8 +129,8 @@ func newConfiguredChannelBindings(cfg *config.MCPConfig, factory *mcpclient.Chan
 type harpoonChannelBindingParams struct {
 	fx.In
 
-	HarpoonTransport mcp.Transport     `name:"harpoon_in_memory_transport" optional:"true"`
-	HarpoonRegistry  *harpoon.Registry `optional:"true"`
+	HarpoonTransport mcp.Transport                  `name:"harpoon_in_memory_transport" optional:"true"`
+	HarpoonRegistry  runtimeharpoon.RegistryCounter `optional:"true"`
 }
 
 func newHarpoonChannelBinding(p harpoonChannelBindingParams) dispatcherChannelBinding {
@@ -138,7 +138,7 @@ func newHarpoonChannelBinding(p harpoonChannelBindingParams) dispatcherChannelBi
 	return dispatcherChannelBinding{
 		Channel:                    types.ChannelHarpoon,
 		Priority:                   0,
-		TransportKind:              config.MCPTransportInMemory,
+		TransportKind:              runtimeconfig.MCPTransportInMemory,
 		Transport:                  transport,
 		SupportsMCP:                true,
 		SupportsOAuth:              false,
@@ -153,7 +153,7 @@ type processorChannelBindingsParams struct {
 	fx.In
 
 	Bindings     []dispatcherChannelBinding `group:"dispatcher_channel_bindings"`
-	ControlPlane *config.ControlPlaneConfig
+	ControlPlane *runtimeconfig.ControlPlaneConfig
 }
 
 func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Channel]dispatcherinternal.ChannelBinding, error) {
@@ -191,7 +191,7 @@ func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Ch
 			// consume another request's JSON-RPC response. Stdio also keeps its
 			// child-process pipes alive when one request deadline expires and
 			// filters that request's late response before the next lifecycle.
-			if binding.TransportKind == config.MCPTransportStdio {
+			if binding.TransportKind == runtimeconfig.MCPTransportStdio {
 				transport = mcpclient.NewSerializedForwardingTransportWithDeadlineRetirement(transport)
 			} else if canonical == types.ChannelHarpoon {
 				transport = mcpclient.NewSerializedForwardingTransport(transport)
@@ -231,7 +231,7 @@ func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Ch
 	return out, nil
 }
 
-func requiredDispatcherChannels(cfg *config.ControlPlaneConfig) []types.Channel {
+func requiredDispatcherChannels(cfg *runtimeconfig.ControlPlaneConfig) []types.Channel {
 	if cfg != nil && cfg.PollChannelsConfigured {
 		return cfg.PollChannels
 	}

@@ -16,8 +16,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/fx"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	tclog "github.com/openai/tunnel-client/pkg/log"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
 type stdioCommandTransport struct {
@@ -64,7 +64,7 @@ func newStdioCommandTransport(logger *slog.Logger, lifecycle fx.Lifecycle, shutd
 	}
 }
 
-func (t *stdioCommandTransport) Transport(cfg *config.MCPConfig) (*mcp.IOTransport, error) {
+func (t *stdioCommandTransport) Transport(cfg *runtimeconfig.MCPConfig) (*mcp.IOTransport, error) {
 	if cfg == nil {
 		return nil, errors.New("mcpclient: mcp config is required for stdio transport")
 	}

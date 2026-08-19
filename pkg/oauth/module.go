@@ -10,10 +10,10 @@ import (
 
 	"go.uber.org/fx"
 
-	"github.com/openai/tunnel-client/pkg/config"
-	"github.com/openai/tunnel-client/pkg/harpoon/hostbus"
 	tclog "github.com/openai/tunnel-client/pkg/log"
 	"github.com/openai/tunnel-client/pkg/mcpclient"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
+	"github.com/openai/tunnel-client/pkg/runtimeharpoon/hostbus"
 )
 
 // Module wires OAuth discovery state and fetcher.
@@ -28,7 +28,7 @@ type discoveryParams struct {
 
 	Lifecycle  fx.Lifecycle
 	Logger     *slog.Logger
-	MCPConfig  *config.MCPConfig
+	MCPConfig  *runtimeconfig.MCPConfig
 	HTTPClient *http.Client `name:"mcp_client"`
 	State      *DiscoveryState
 	Bus        hostbus.HostRegistrationBus
@@ -67,7 +67,7 @@ func startOAuthDiscovery(p discoveryParams) error {
 		unixSocketPath = mainBinding.UnixSocketPath
 	}
 	if transportKind == "" {
-		transportKind = config.MCPTransportHTTPStreamable
+		transportKind = runtimeconfig.MCPTransportHTTPStreamable
 	}
 
 	p.Lifecycle.Append(fx.Hook{
@@ -79,7 +79,7 @@ func startOAuthDiscovery(p discoveryParams) error {
 				return nil
 			}
 
-			if transportKind != config.MCPTransportHTTPStreamable || serverURL == nil {
+			if transportKind != runtimeconfig.MCPTransportHTTPStreamable || serverURL == nil {
 				reason := fmt.Sprintf("oauth discovery disabled for transport %q", transportKind)
 				if serverURL == nil {
 					reason = "oauth discovery server URL is not configured"
@@ -179,7 +179,7 @@ func startOAuthDiscovery(p discoveryParams) error {
 	return nil
 }
 
-func waitForMCPStartupProbe(ctx context.Context, cfg *config.MCPConfig, probeState *mcpclient.ProbeState) error {
+func waitForMCPStartupProbe(ctx context.Context, cfg *runtimeconfig.MCPConfig, probeState *mcpclient.ProbeState) error {
 	if cfg == nil || cfg.StartupWaitTimeout <= 0 {
 		return nil
 	}

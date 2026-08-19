@@ -210,16 +210,89 @@ go build ./...
 go test ./...
 ```
 
-## Dependency SBOM
+## SBOMs
 
-The public repository includes
-[`compliance/tunnel-client.spdx.json`](https://github.com/openai/tunnel-client/blob/master/compliance/tunnel-client.spdx.json)
-as a deterministic six-platform baseline. It inventories synthetic
-full-client payloads built from declared offline source and vendor snapshots,
-including the pinned Cloudflared module version, purl, and CPE. Do not hand-edit
-the file; maintainers refresh it through the hermetic SBOM generation check
-when dependency inputs or the Cloudflared pin change. This baseline does not
-claim that public release builds consume the same dependency-source snapshots.
+The public repository includes deterministic six-platform dependency baselines
+for the
+[full client](https://github.com/openai/tunnel-client/blob/master/compliance/tunnel-client.spdx.json),
+[runtime](https://github.com/openai/tunnel-client/blob/master/compliance/tunnel-client-runtime.spdx.json),
+and
+[runtime with Cloudflared](https://github.com/openai/tunnel-client/blob/master/compliance/tunnel-client-runtime-cloudflared.spdx.json).
+They inventory synthetic payloads built from declared offline source and vendor
+snapshots, including pinned Cloudflared module versions, purls, and CPEs. Do
+not hand-edit them; maintainers refresh them through the hermetic SBOM
+generation check when dependency inputs or a Cloudflared pin changes. The
+baselines are useful for dependency review and drift detection, but they do not
+claim that a public release ZIP contains the same bytes.
+
+From a checkout of this public repository, verify that the mirrored baseline
+files match their mirrored manifest before importing them into a dependency
+scanner:
+
+```bash
+./scripts/verify_sbom_baselines.sh
+```
+
+That command proves the checkout's three baseline documents match
+`compliance/sbom-baseline-manifest.json` and parse as SPDX 2.3. It does not
+prove that any release archive contains those bytes.
+
+### Validate a downloaded release
+
+Releases produced by the current release workflow publish a matching SPDX 2.3
+sidecar for each ZIP, embed the same sidecar in the ZIP, and cover both files
+in `SHA256SUMS.txt`. Older releases without `.spdx.json` sidecars cannot be
+artifact-validated this way. Use the release sidecar, not a checked-in
+baseline, to validate downloaded bytes.
+
+From a checkout of this public repository at the matching release tag, replace
+the example tag and choose one of `client`, `runtime`, or
+`runtime-cloudflared`. The commands require Bash, Python 3, `curl`, and the
+GitHub CLI:
+
+```bash
+release=vX.Y.Z
+platform=linux-amd64
+flavor=runtime
+prefix=tunnel-client-runtime
+stem="${prefix}-${release}-${platform}"
+base="https://github.com/openai/tunnel-client/releases/download/${release}"
+
+curl -fLO "${base}/${stem}.zip"
+curl -fLO "${base}/${stem}.spdx.json"
+curl -fLO "${base}/SHA256SUMS.txt"
+
+gh attestation verify "${stem}.zip" \
+  --repo openai/tunnel-client \
+  --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
+  --source-ref "refs/tags/${release}"
+gh attestation verify "${stem}.spdx.json" \
+  --repo openai/tunnel-client \
+  --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
+  --source-ref "refs/tags/${release}"
+gh attestation verify SHA256SUMS.txt \
+  --repo openai/tunnel-client \
+  --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
+  --source-ref "refs/tags/${release}"
+
+./scripts/verify_release_archive.sh \
+  --flavor "${flavor}" \
+  --archive "${stem}.zip" \
+  --sbom "${stem}.spdx.json" \
+  --checksums SHA256SUMS.txt
+```
+
+Use `prefix=tunnel-client` with `flavor=client`, or
+`prefix=tunnel-client-runtime-cloudflared` with
+`flavor=runtime-cloudflared`. The attestation checks establish that the ZIP,
+sidecar, and checksum file came from this repository's release workflow. The
+archive verifier then fails closed when the published checksums do not match,
+the ZIP is too large or has unsafe, duplicate, or non-regular members, its
+embedded sidecar differs from the downloaded sidecar, or the SPDX SHA256
+inventory does not match the extracted payload. After it passes, import the
+matching `.spdx.json` file into the dependency scanner of your choice. Runtime
+releases also publish a matching `*-scan-manifest.json` that binds scanner
+scope, source archives, license evidence, and the release sidecars.
 
 Build the CLI binary:
 
@@ -228,6 +301,52 @@ make admin-ui
 go build -o bin/tunnel-client ./cmd/client
 ./bin/tunnel-client help quickstart
 ```
+
+## Narrow runtime artifacts
+
+`tunnel-client-runtime` and `tunnel-client-runtime-cloudflared` are the
+runtime-only customer surfaces. They intentionally expose only `run` plus
+flag-based `--help` and `--version`; use the full `tunnel-client` binary for
+onboarding, admin, Codex, and profile-management commands. The Cloudflare
+flavor adds only the approved `cloudflared.*` settings and supervises a pinned
+`cloudflared` companion.
+
+Build either binary from a source checkout with its Make target (the shorter
+aliases are equivalent):
+
+```bash
+make tunnel-client-runtime              # alias: make runtime
+make tunnel-client-runtime-cloudflared  # alias: make runtime-cloudflared
+```
+
+The targets write platform-specific binaries under `bin/<goos>_<goarch>/` and
+stable paths at `bin/tunnel-client-runtime` and
+`bin/tunnel-client-runtime-cloudflared` (`.exe` on Windows). Inspect the exact
+runtime flags with `./bin/tunnel-client-runtime run --help` or
+`./bin/tunnel-client-runtime-cloudflared run --help`.
+
+Run the narrow runtime against an HTTP MCP server:
+
+```bash
+export CONTROL_PLANE_API_KEY='...'
+export CONTROL_PLANE_TUNNEL_ID='tunnel_0123456789abcdef0123456789abcdef'
+export MCP_SERVER_URL='https://mcp.example.com/mcp'
+./bin/tunnel-client-runtime run
+```
+
+For managed Cloudflare provisioning, use the Cloudflare flavor. Release
+archives place the pinned `cloudflared` executable beside the runtime; for a
+source-only build, point to an existing companion explicitly:
+
+```bash
+./bin/tunnel-client-runtime-cloudflared run \
+  --cloudflared.managed \
+  --cloudflared.path /path/to/cloudflared
+```
+
+To build the corresponding Linux images, use `make build-image-runtime` and
+`make build-image-runtime-cloudflared`; the Cloudflare image includes its pinned
+companion and both images use `run` as their entrypoint.
 
 Public releases use plain semantic-version tags such as `v0.0.10`. Source
 archives from release tags carry the release version in

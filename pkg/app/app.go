@@ -3,13 +3,13 @@ package app
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"go.uber.org/fx"
 
 	"github.com/openai/tunnel-client/pkg/adminui"
 	"github.com/openai/tunnel-client/pkg/cloudflared"
+	cloudflaredruntime "github.com/openai/tunnel-client/pkg/cloudflared/runtime"
 	"github.com/openai/tunnel-client/pkg/config"
 	controlplane "github.com/openai/tunnel-client/pkg/controlplane/fx"
 	"github.com/openai/tunnel-client/pkg/dispatcher"
@@ -90,30 +90,10 @@ func OptionsWithRuntime(cfg *config.Config, runtime RuntimeOptions, opts ...fx.O
 }
 
 func cloudflaredStartTimeout(cfg *config.Config) time.Duration {
-	if cfg == nil || !cfg.Cloudflared.Enabled() || cfg.Cloudflared.ReadyTimeout <= 0 {
+	if cfg == nil {
 		return fx.DefaultTimeout
 	}
-
-	timeout := addStartupTimeout(fx.DefaultTimeout, cfg.Cloudflared.ReadyTimeout)
-	// Managed mode fetches the runtime token before cloudflared starts. Give
-	// that request its full configured control-plane deadline so a slow fetch
-	// cannot consume the subsequent cloudflared readiness budget. A static
-	// token wins and never needs this additional allowance.
-	if cfg.Cloudflared.Managed && strings.TrimSpace(cfg.Cloudflared.Token) == "" {
-		timeout = addStartupTimeout(timeout, cfg.ControlPlane.PollDeadlineTimeoutOrDefault())
-	}
-	return timeout
-}
-
-func addStartupTimeout(base, extra time.Duration) time.Duration {
-	const maxDuration = time.Duration(1<<63 - 1)
-	if extra <= 0 {
-		return base
-	}
-	if base >= maxDuration-extra {
-		return maxDuration
-	}
-	return base + extra
+	return cloudflaredruntime.StartupTimeout(fx.DefaultTimeout, cfg.Cloudflared, cfg.ControlPlane)
 }
 
 // New constructs a tunnel-client Fx app using the shared wiring plus any extra options.

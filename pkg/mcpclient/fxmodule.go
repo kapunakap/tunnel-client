@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/headerscope"
 	tclog "github.com/openai/tunnel-client/pkg/log"
 	tcmetrics "github.com/openai/tunnel-client/pkg/metrics"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
 	tctransport "github.com/openai/tunnel-client/pkg/transport"
 	"github.com/openai/tunnel-client/pkg/types"
@@ -52,8 +52,8 @@ const (
 type clientParams struct {
 	fx.In
 
-	Config           *config.MCPConfig
-	Logging          *config.LoggingConfig
+	Config           *runtimeconfig.MCPConfig
+	Logging          *runtimeconfig.LoggingConfig
 	Logger           *slog.Logger
 	MeterProvider    *sdkmetric.MeterProvider
 	TransportFactory *ChannelTransportFactory
@@ -70,7 +70,7 @@ type clientOutputs struct {
 type runnerParams struct {
 	fx.In
 
-	Config     *config.MCPConfig
+	Config     *runtimeconfig.MCPConfig
 	Client     *mcp.Client
 	Transport  mcp.Transport
 	Lifecycle  fx.Lifecycle
@@ -100,7 +100,7 @@ func newMcpClient(p clientParams) (clientOutputs, error) {
 		return clientOutputs{Client: mcpClient, HTTPClient: &http.Client{}}, nil
 	}
 	if mainBinding == nil {
-		legacyBinding := config.MCPChannelBinding{
+		legacyBinding := runtimeconfig.MCPChannelBinding{
 			Channel:        types.DefaultChannel,
 			TransportKind:  p.Config.TransportKind,
 			ServerURL:      p.Config.ServerURL,
@@ -112,13 +112,13 @@ func newMcpClient(p clientParams) (clientOutputs, error) {
 	}
 	transportKind := mainBinding.TransportKind
 	if transportKind == "" {
-		transportKind = config.MCPTransportHTTPStreamable
+		transportKind = runtimeconfig.MCPTransportHTTPStreamable
 		mainBinding.TransportKind = transportKind
 	}
-	if transportKind == config.MCPTransportHTTPStreamable && mainBinding.ServerURL == nil {
+	if transportKind == runtimeconfig.MCPTransportHTTPStreamable && mainBinding.ServerURL == nil {
 		return clientOutputs{}, fmt.Errorf("mcpclient: main channel binding is required")
 	}
-	if transportKind == config.MCPTransportStdio && len(mainBinding.CommandArgs) == 0 {
+	if transportKind == runtimeconfig.MCPTransportStdio && len(mainBinding.CommandArgs) == 0 {
 		return clientOutputs{}, fmt.Errorf("mcpclient: main channel binding is required")
 	}
 	mcpTransport, err := p.TransportFactory.Build(*mainBinding)
@@ -151,11 +151,11 @@ func probeMcpServer(p runnerParams) error {
 		}
 		return nil
 	}
-	transportKind := config.MCPTransportHTTPStreamable
+	transportKind := runtimeconfig.MCPTransportHTTPStreamable
 	if p.Config.TransportKind != "" {
 		transportKind = p.Config.TransportKind
 	}
-	if transportKind != config.MCPTransportHTTPStreamable {
+	if transportKind != runtimeconfig.MCPTransportHTTPStreamable {
 		if p.ProbeState != nil {
 			p.ProbeState.Set(nil)
 		}
@@ -164,7 +164,7 @@ func probeMcpServer(p runnerParams) error {
 		}
 		return nil
 	}
-	if transportKind == config.MCPTransportHTTPStreamable && p.Config.ServerURL == nil {
+	if transportKind == runtimeconfig.MCPTransportHTTPStreamable && p.Config.ServerURL == nil {
 		return fmt.Errorf("mcpclient: server URL is required for %s transport", transportKind)
 	}
 
@@ -532,17 +532,17 @@ func (w slogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func buildMcpHTTPTransport(logger *slog.Logger, loggingCfg *config.LoggingConfig, meterProvider *sdkmetric.MeterProvider, tlsBundle *tlsconfig.Bundle, clientCertificate *tlsconfig.ClientCertificate, unixSocketPath string, proxyURL *url.URL, serverURL *url.URL, extraHeaders map[string]string, discoveryExtraHeaders map[string]string) (http.RoundTripper, error) {
+func buildMcpHTTPTransport(logger *slog.Logger, loggingCfg *runtimeconfig.LoggingConfig, meterProvider *sdkmetric.MeterProvider, tlsBundle *tlsconfig.Bundle, clientCertificate *tlsconfig.ClientCertificate, unixSocketPath string, proxyURL *url.URL, serverURL *url.URL, extraHeaders map[string]string, discoveryExtraHeaders map[string]string) (http.RoundTripper, error) {
 	// Order matters (outermost to innermost):
 	//   1. Static headers apply operator headers to the configured MCP origin.
 	//   2. Forwarding injects per-request connector headers last so they win conflicts.
 	//   3. Logging wraps otel instrumentation so raw dumps include final headers.
 	//   4. otelhttp instrumentation and its route labeler sit close to the network to record final calls.
-	extraHeaders, err := config.NormalizeExtraHeaders("MCP extra headers", extraHeaders)
+	extraHeaders, err := runtimeconfig.NormalizeExtraHeaders("MCP extra headers", extraHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: %w", err)
 	}
-	discoveryExtraHeaders, err = config.NormalizeExtraHeaders("MCP discovery extra headers", discoveryExtraHeaders)
+	discoveryExtraHeaders, err = runtimeconfig.NormalizeExtraHeaders("MCP discovery extra headers", discoveryExtraHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: %w", err)
 	}
@@ -606,12 +606,12 @@ func sameURLOrigin(left *url.URL, right *url.URL) bool {
 	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }
 
-func transportTargetLabel(kind config.MCPTransportKind, serverURL *url.URL) string {
-	if kind == config.MCPTransportHTTPStreamable && serverURL != nil {
+func transportTargetLabel(kind runtimeconfig.MCPTransportKind, serverURL *url.URL) string {
+	if kind == runtimeconfig.MCPTransportHTTPStreamable && serverURL != nil {
 		return serverURL.String()
 	}
 	if kind == "" {
-		return string(config.MCPTransportHTTPStreamable)
+		return string(runtimeconfig.MCPTransportHTTPStreamable)
 	}
 	return string(kind)
 }

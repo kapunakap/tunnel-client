@@ -11,7 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 
 	"github.com/openai/tunnel-client/pkg/clientinstance"
-	"github.com/openai/tunnel-client/pkg/config"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"github.com/openai/tunnel-client/pkg/tunnelctx"
 )
 
@@ -52,9 +52,9 @@ const (
 	ComponentHarpoon      = "harpoon"
 )
 
-// NewLogger constructs a slog.Logger configured according to the provided config.
+// NewLogger constructs a slog.Logger configured according to the provided runtimeconfig.
 // It returns the logger along with an optional closer that must be closed by the caller.
-func NewLogger(cfg *config.LoggingConfig, defaultWriter io.Writer) (*slog.Logger, io.Closer, error) {
+func NewLogger(cfg *runtimeconfig.LoggingConfig, defaultWriter io.Writer) (*slog.Logger, io.Closer, error) {
 	controller, err := NewLevelController(cfg)
 	if err != nil {
 		return nil, nil, err
@@ -63,7 +63,7 @@ func NewLogger(cfg *config.LoggingConfig, defaultWriter io.Writer) (*slog.Logger
 }
 
 // NewLoggerWithLevelController constructs a slog.Logger backed by the provided level controller.
-func NewLoggerWithLevelController(cfg *config.LoggingConfig, defaultWriter io.Writer, controller *LevelController) (*slog.Logger, io.Closer, error) {
+func NewLoggerWithLevelController(cfg *runtimeconfig.LoggingConfig, defaultWriter io.Writer, controller *LevelController) (*slog.Logger, io.Closer, error) {
 	if cfg == nil {
 		return nil, nil, fmt.Errorf("logging config is nil")
 	}
@@ -75,7 +75,7 @@ func NewLoggerWithLevelController(cfg *config.LoggingConfig, defaultWriter io.Wr
 	writer := defaultWriter
 	var closer io.Closer
 
-	if cfg.Format == config.LogFormatUnset {
+	if cfg.Format == runtimeconfig.LogFormatUnset {
 		logger = slog.New(newDefaultHandler(slog.Default().Handler(), controller))
 		if cfg.File != "" {
 			return nil, nil, fmt.Errorf("invalid logging configuration: file is only supported for json or struct-text")
@@ -201,11 +201,11 @@ func isBuiltinDefaultStyleHandler(base slog.Handler) bool {
 	}
 }
 
-func buildHandler(format config.LogFormat, writer io.Writer, opts *slog.HandlerOptions) (slog.Handler, error) {
+func buildHandler(format runtimeconfig.LogFormat, writer io.Writer, opts *slog.HandlerOptions) (slog.Handler, error) {
 	switch format {
-	case config.LogFormatJSON:
+	case runtimeconfig.LogFormatJSON:
 		return slog.NewJSONHandler(writer, opts), nil
-	case config.LogFormatStructText:
+	case runtimeconfig.LogFormatStructText:
 		return slog.NewTextHandler(writer, opts), nil
 	default:
 		return nil, fmt.Errorf("unsupported log format %q", format.String())

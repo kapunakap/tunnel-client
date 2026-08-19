@@ -22,12 +22,12 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	otelmetric "go.opentelemetry.io/otel/metric"
 
-	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/controlplane"
 	"github.com/openai/tunnel-client/pkg/controlplane/apierror"
 	wiretypes "github.com/openai/tunnel-client/pkg/controlplane/wiretypes"
 	tclog "github.com/openai/tunnel-client/pkg/log"
 	tcmetrics "github.com/openai/tunnel-client/pkg/metrics"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"github.com/openai/tunnel-client/pkg/tlsconfig"
 	tctransport "github.com/openai/tunnel-client/pkg/transport"
 	"github.com/openai/tunnel-client/pkg/tunnelctx"
@@ -73,8 +73,8 @@ type TunnelServiceClient struct {
 	retrySleep                     func(context.Context, time.Duration) bool
 }
 
-// NewTunnelServiceClient constructs an HTTP-backed client using the provided config.
-func NewTunnelServiceClient(ctx context.Context, cfg *config.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *config.LoggingConfig, meterProvider otelmetric.MeterProvider) (*TunnelServiceClient, error) {
+// NewTunnelServiceClient constructs an HTTP-backed client using the provided runtimeconfig.
+func NewTunnelServiceClient(ctx context.Context, cfg *runtimeconfig.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *runtimeconfig.LoggingConfig, meterProvider otelmetric.MeterProvider) (*TunnelServiceClient, error) {
 	if cfg == nil {
 		return nil, errMissingConfig
 	}
@@ -87,7 +87,7 @@ func NewTunnelServiceClient(ctx context.Context, cfg *config.ControlPlaneConfig,
 	if cfg.APIKey == "" {
 		return nil, errors.New("controlplane client: control-plane.api-key is required")
 	}
-	if err := config.ValidateControlPlaneAPIKey(cfg.APIKey); err != nil {
+	if err := runtimeconfig.ValidateControlPlaneAPIKey(cfg.APIKey); err != nil {
 		return nil, fmt.Errorf("controlplane client: %w", err)
 	}
 	if meterProvider == nil {
@@ -99,10 +99,10 @@ func NewTunnelServiceClient(ctx context.Context, cfg *config.ControlPlaneConfig,
 	}
 
 	tunnelIDSegment := url.PathEscape(cfg.TunnelID.String())
-	pollEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(pollPathFormat, tunnelIDSegment))
-	responseEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(responsePathFormat, tunnelIDSegment))
-	metadataEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(metadataPathFormat, tunnelIDSegment))
-	managedCloudflareEndpoint := config.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(managedCloudflarePathFormat, tunnelIDSegment))
+	pollEndpoint := runtimeconfig.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(pollPathFormat, tunnelIDSegment))
+	responseEndpoint := runtimeconfig.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(responsePathFormat, tunnelIDSegment))
+	metadataEndpoint := runtimeconfig.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(metadataPathFormat, tunnelIDSegment))
+	managedCloudflareEndpoint := runtimeconfig.ResolveControlPlanePath(cfg.BaseURL, cfg.URLPath, fmt.Sprintf(managedCloudflarePathFormat, tunnelIDSegment))
 
 	pollTimeout := cfg.PollTimeoutOrDefault()
 	pollGuardrail := cfg.PollDeadlineGuardrailOrDefault()
@@ -374,7 +374,7 @@ func newSecretAPIStatusError(prefix string, resp *http.Response, now time.Time) 
 	return statusErr
 }
 
-func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *config.LoggingConfig, meterProvider otelmetric.MeterProvider) (http.RoundTripper, error) {
+func buildControlPlaneHTTPTransport(cfg *runtimeconfig.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *runtimeconfig.LoggingConfig, meterProvider otelmetric.MeterProvider) (http.RoundTripper, error) {
 	return buildControlPlaneHTTPTransportWithLogging(
 		cfg,
 		tlsBundle,
@@ -385,7 +385,7 @@ func buildControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *t
 	)
 }
 
-func buildSecretControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, meterProvider otelmetric.MeterProvider) (http.RoundTripper, error) {
+func buildSecretControlPlaneHTTPTransport(cfg *runtimeconfig.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, meterProvider otelmetric.MeterProvider) (http.RoundTripper, error) {
 	return buildControlPlaneHTTPTransportWithLogging(
 		cfg,
 		tlsBundle,
@@ -396,14 +396,14 @@ func buildSecretControlPlaneHTTPTransport(cfg *config.ControlPlaneConfig, tlsBun
 	)
 }
 
-func buildControlPlaneHTTPTransportWithLogging(cfg *config.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *config.LoggingConfig, meterProvider otelmetric.MeterProvider, includeRawHTTPLogging bool) (http.RoundTripper, error) {
+func buildControlPlaneHTTPTransportWithLogging(cfg *runtimeconfig.ControlPlaneConfig, tlsBundle *tlsconfig.Bundle, logger *slog.Logger, loggingCfg *runtimeconfig.LoggingConfig, meterProvider otelmetric.MeterProvider, includeRawHTTPLogging bool) (http.RoundTripper, error) {
 	// Order matters (outermost to innermost):
 	//   1. Control-plane round tripper applies auth headers before anything else.
 	//   2. Optional logging wraps otel instrumentation so dumps include the final headers.
 	//   3. otelhttp instrumentation and its route labeler sit close to the network for accurate metrics.
 	//   4. Response receipt recording sits closest to the network so outer response
 	//      middleware cannot delay the timestamp by consuming the response body.
-	extraHeaders, err := config.NormalizeExtraHeaders("controlplane client extra headers", cfg.ExtraHeaders)
+	extraHeaders, err := runtimeconfig.NormalizeExtraHeaders("controlplane client extra headers", cfg.ExtraHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("controlplane client: %w", err)
 	}
@@ -787,7 +787,7 @@ func (c *TunnelServiceClient) nowTime() time.Time {
 }
 
 func pollTimeoutMilliseconds(timeout time.Duration) int64 {
-	timeoutMS := (config.ControlPlaneConfig{PollTimeout: timeout}).PollTimeoutOrDefault().Milliseconds()
+	timeoutMS := (runtimeconfig.ControlPlaneConfig{PollTimeout: timeout}).PollTimeoutOrDefault().Milliseconds()
 	if timeoutMS > 0 {
 		return timeoutMS
 	}

@@ -51,12 +51,3 @@ func TestCloudflaredStartTimeoutSkipsFetchBudgetForStaticToken(t *testing.T) {
 		t.Fatalf("expected static-token startup timeout %s, got %s", want, got)
 	}
 }
-
-func TestAddStartupTimeoutSaturates(t *testing.T) {
-	t.Parallel()
-
-	const maxDuration = time.Duration(1<<63 - 1)
-	if got := addStartupTimeout(maxDuration-time.Second, 2*time.Second); got != maxDuration {
-		t.Fatalf("expected saturated duration %s, got %s", maxDuration, got)
-	}
-}

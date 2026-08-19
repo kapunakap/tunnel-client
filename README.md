@@ -212,8 +212,9 @@ go test ./...
 
 ## Dependency SBOM
 
-The repository keeps [`compliance/tunnel-client.spdx.json`](compliance/tunnel-client.spdx.json)
-as a checked-in, deterministic six-platform baseline. It inventories synthetic
+The public repository includes
+[`compliance/tunnel-client.spdx.json`](https://github.com/openai/tunnel-client/blob/master/compliance/tunnel-client.spdx.json)
+as a deterministic six-platform baseline. It inventories synthetic
 full-client payloads built from declared offline source and vendor snapshots,
 including the pinned Cloudflared module version, purl, and CPE. Do not hand-edit
 the file; maintainers refresh it through the hermetic SBOM generation check

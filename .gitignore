@@ -3,3 +3,10 @@
 bin/
 /client
 adminui/node_modules/
+
+# BEGIN AUTODEP GENERATED CONTENTS #
+# These files are stored in blob storage, see `blob_data` and `testing_blob_data` under `[tool.applied_manage]` in the project's `pyproject.toml` file
+compliance/tunnel-client-runtime-cloudflared.spdx.json
+compliance/tunnel-client-runtime.spdx.json
+compliance/tunnel-client.spdx.json
+# END AUTODEP GENERATED CONTENTS #

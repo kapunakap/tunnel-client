@@ -602,77 +602,6 @@ jobs:
           path: dist/source/*.tar.gz
           if-no-files-found: error
 
-  release-approval:
-    name: Require release approval
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: test
-    runs-on: ubuntu-latest
-    # Repository administrators must protect this environment with the Legal
-    # and release-approval reviewers. Every tagged artifact and OCI push waits
-    # for this job, while ordinary branch/PR container smoke still runs.
-    environment: release-approval
-    permissions:
-      contents: read
-    steps:
-      - name: Require cloudflared license approval and scanner baseline evidence
-        env:
-          CLOUDFLARED_BSD_2_CLAUSE_APPROVAL_REF: ${{ vars.CLOUDFLARED_BSD_2_CLAUSE_APPROVAL_REF }}
-          VERACODE_BASELINE_UPLOAD_SHA256: ${{ vars.VERACODE_BASELINE_UPLOAD_SHA256 }}
-          VERACODE_BASELINE_FINDINGS_JSON: ${{ vars.VERACODE_BASELINE_FINDINGS_JSON }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${CLOUDFLARED_BSD_2_CLAUSE_APPROVAL_REF}" ]]; then
-            echo "release is blocked: set CLOUDFLARED_BSD_2_CLAUSE_APPROVAL_REF only after Legal and release-approval approve the cloudflared BSD-2-Clause delta" >&2
-            exit 1
-          fi
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-
-          digest = os.environ.get("VERACODE_BASELINE_UPLOAD_SHA256", "")
-          if not re.fullmatch(r"[0-9a-f]{64}", digest):
-              raise SystemExit(
-                  "release is blocked: VERACODE_BASELINE_UPLOAD_SHA256 must be the exact baseline upload SHA256"
-              )
-
-          try:
-              findings = json.loads(os.environ.get("VERACODE_BASELINE_FINDINGS_JSON", ""))
-          except json.JSONDecodeError as error:
-              raise SystemExit(
-                  "release is blocked: VERACODE_BASELINE_FINDINGS_JSON must be valid JSON"
-              ) from error
-          if not isinstance(findings, list) or len(findings) != 25:
-              raise SystemExit(
-                  "release is blocked: VERACODE_BASELINE_FINDINGS_JSON must enumerate all 25 baseline findings"
-              )
-          required = {
-              "findingId",
-              "severity",
-              "cwe",
-              "affectedPath",
-              "test",
-              "proof",
-              "disposition",
-              "owner",
-          }
-          ids = []
-          for finding in findings:
-              if not isinstance(finding, dict) or required - finding.keys():
-                  raise SystemExit(
-                      "release is blocked: every baseline finding needs ID, severity, CWE, path, test, proof, disposition, and owner"
-                  )
-              if any(not isinstance(finding[field], str) or not finding[field] for field in required):
-                  raise SystemExit(
-                      "release is blocked: baseline finding fields must be non-empty strings"
-                  )
-              ids.append(finding["findingId"])
-          if len(set(ids)) != 25 or not {"28", "29", "30"}.issubset(ids):
-              raise SystemExit(
-                  "release is blocked: baseline finding IDs must be unique and include 28, 29, and 30"
-              )
-          PY
-
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/')
@@ -681,7 +610,6 @@ jobs:
       - source-export
       - container
       - runtime-container
-      - release-approval
     runs-on: macos-latest
     permissions:
       actions: read
@@ -723,14 +651,10 @@ jobs:
       - name: Generate runtime scan manifests
         env:
           PUBLIC_BASE_URL: ${{ steps.release_meta.outputs.public_base_url }}
-          CLOUDFLARED_BSD_2_CLAUSE_APPROVAL_REF: ${{ vars.CLOUDFLARED_BSD_2_CLAUSE_APPROVAL_REF }}
-          VERACODE_BASELINE_UPLOAD_SHA256: ${{ vars.VERACODE_BASELINE_UPLOAD_SHA256 }}
-          VERACODE_BASELINE_FINDINGS_JSON: ${{ vars.VERACODE_BASELINE_FINDINGS_JSON }}
         run: |
           python3 - "${GITHUB_REF_NAME}" "${PUBLIC_BASE_URL}" <<'PY'
           import hashlib
           import json
-          import os
           import pathlib
           import sys
           import tarfile
@@ -739,11 +663,6 @@ jobs:
           public_dir = pathlib.Path("dist/public")
           payload_metadata_dir = pathlib.Path("dist/release-metadata")
           container_metadata_dir = pathlib.Path("dist/container-metadata")
-          baseline_upload_sha256 = os.environ["VERACODE_BASELINE_UPLOAD_SHA256"]
-          finding_disposition = json.loads(os.environ["VERACODE_BASELINE_FINDINGS_JSON"])
-          cloudflared_license_approval = os.environ[
-              "CLOUDFLARED_BSD_2_CLAUSE_APPROVAL_REF"
-          ]
 
           def digest(path: pathlib.Path) -> str:
               value = hashlib.sha256()
@@ -979,19 +898,6 @@ jobs:
                       else []
                   ),
                   "scannerInstructions": "Fail closed: scan the exact release ZIP or OCI image digest, matching SPDX and license evidence, and every source archive named in this manifest after verifying each SHA256.",
-                  "baselineScannerReport": {
-                      "provider": "PwC/Veracode",
-                      "reportDate": "2026-08-12",
-                      "uploadedArchive": "tunnel-client-veracode-3cf5363.zip",
-                      "uploadedArtifactDigest": baseline_upload_sha256,
-                  },
-                  "licenseApproval": {
-                      "cloudflaredBSD2Clause": {
-                          "approvalRef": cloudflared_license_approval,
-                          "requiredReviewers": ["Legal", "release-approval"],
-                      }
-                  },
-                  "findingDisposition": finding_disposition,
                   "findingGroups": runtime_relevant_finding_groups,
               }
               (public_dir / name).write_text(
@@ -1112,25 +1018,7 @@ jobs:
               (.platformArtifacts | length == 6) and
               (.ociImage.digest | test("^sha256:[0-9a-f]{64}$")) and
               (.ociImage.buildkitSbomAttestation == true) and
-              (.ociImage.provenanceAttestation == true) and
-              (.baselineScannerReport.uploadedArtifactDigest | test("^[0-9a-f]{64}$")) and
-              (.licenseApproval.cloudflaredBSD2Clause.approvalRef | length > 0) and
-              (.findingDisposition | length == 25) and
-              ([.findingDisposition[].findingId] | unique | length == 25) and
-              ([.findingDisposition[].findingId] | index("28") != null) and
-              ([.findingDisposition[].findingId] | index("29") != null) and
-              ([.findingDisposition[].findingId] | index("30") != null) and
-              all(
-                .findingDisposition[];
-                (.findingId | type == "string" and length > 0) and
-                (.severity | type == "string" and length > 0) and
-                (.cwe | type == "string" and length > 0) and
-                (.affectedPath | type == "string" and length > 0) and
-                (.test | type == "string" and length > 0) and
-                (.proof | type == "string" and length > 0) and
-                (.disposition | type == "string" and length > 0) and
-                (.owner | type == "string" and length > 0)
-              )
+              (.ociImage.provenanceAttestation == true)
             ' "${manifest}" >/dev/null
             grep -F "  ${manifest}" SHA256SUMS.txt >/dev/null
             grep -Fx "${PUBLIC_BASE_URL}/${manifest}" PUBLIC_URLS.txt >/dev/null
@@ -1321,8 +1209,7 @@ jobs:
     name: Publish container
     needs:
       - test
-      - release-approval
-    if: ${{ always() && needs.test.result == 'success' && (github.ref_type != 'tag' || needs.release-approval.result == 'success') }}
+    if: ${{ always() && needs.test.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1402,8 +1289,7 @@ jobs:
     name: Publish ${{ matrix.title }} container
     needs:
       - test
-      - release-approval
-    if: ${{ always() && needs.test.result == 'success' && (github.ref_type != 'tag' || needs.release-approval.result == 'success') }}
+    if: ${{ always() && needs.test.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

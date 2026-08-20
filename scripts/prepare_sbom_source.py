@@ -1,8 +1,8 @@
 """Prepare staged tunnel-client source inputs for hermetic SBOM generation.
 
 This helper is a declared Bazel Python executable. It only reads or rewrites
-paths already staged below TEST_TMPDIR, so the shell driver never falls back to
-an ambient Python interpreter.
+paths already staged below the action-private work root exposed as TEST_TMPDIR,
+so the shell driver never falls back to an ambient Python interpreter.
 """
 
 from __future__ import annotations

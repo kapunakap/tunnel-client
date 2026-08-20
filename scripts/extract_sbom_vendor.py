@@ -1,8 +1,9 @@
 """Safely extract and verify the declared tunnel-client SBOM vendor tree.
 
-The archive is a Bazel test input, not a module acquisition path. Extraction is
-allowed only inside TEST_TMPDIR and the resulting bytes must match the reviewed
-content digest before the SBOM payload builder can run with -mod=vendor.
+The archive is a declared Bazel action input, not a module acquisition path.
+Extraction is allowed only inside the action-private work root exposed as
+TEST_TMPDIR, and the resulting bytes must match the reviewed content digest
+before the SBOM payload builder can run with -mod=vendor.
 """
 
 from __future__ import annotations

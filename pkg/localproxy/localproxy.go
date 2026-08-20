@@ -147,6 +147,9 @@ type Options struct {
 	LookupEnv               func(string) (string, bool)
 	Stdout                  io.Writer
 	Stderr                  io.Writer
+	// DisableFXLogging suppresses Fx lifecycle diagnostics for embedded callers
+	// that provide their own status output, such as local test harnesses.
+	DisableFXLogging bool
 }
 
 // Info is printed by the CLI and consumed by integration tests.
@@ -295,11 +298,17 @@ func Start(ctx context.Context, opts Options) (*Proxy, error) {
 	var probeState *mcpclient.ProbeState
 	var healthService health.Service
 	healthEnabled := opts.HealthListenAddr != ""
+	appOptions := []fx.Option{
+		fx.Provide(func() io.Writer { return opts.Stderr }),
+		fx.Populate(&probeState, &healthService),
+	}
+	if opts.DisableFXLogging {
+		appOptions = append(appOptions, fx.NopLogger)
+	}
 	clientApp := app.NewWithRuntime(
 		cfg,
 		app.RuntimeOptions{DisableHealthAdmin: !healthEnabled},
-		fx.Provide(func() io.Writer { return opts.Stderr }),
-		fx.Populate(&probeState, &healthService),
+		appOptions...,
 	)
 	startCtx, cancel := context.WithTimeout(ctx, opts.ReadinessTimeout)
 	defer cancel()

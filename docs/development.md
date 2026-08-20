@@ -75,6 +75,42 @@ Run:
 go test ./e2e -count=1
 ```
 
+## Single-client local load benchmark
+
+The E2E package also contains an opt-in benchmark that starts one real
+`tunnel-client` runtime, a loopback local control plane, and a lightweight
+local MCP server. It warms up one MCP session, then measures concurrent
+`tools/call` requests through the full local ingress, polling, dispatch, MCP,
+and response path:
+
+```bash
+TUNNEL_CLIENT_LOAD_WORKERS=64 \
+TUNNEL_CLIENT_LOAD_MAX_INFLIGHT=256 \
+TUNNEL_CLIENT_LOAD_MCP_CONCURRENCY=64 \
+TUNNEL_CLIENT_LOAD_PAYLOAD_BYTES=1024 \
+go test ./e2e -run '^$' -bench '^BenchmarkSingleTunnelClient$' -benchtime=30s -count=1 -benchmem
+```
+
+The benchmark reports requests per second and p50/p95/p99/max request latency,
+along with the worker, in-flight queue, MCP concurrency, payload, transport,
+and Go runtime settings used for the run. Adjust these optional environment
+variables to explore a laptop's capacity:
+
+- `TUNNEL_CLIENT_LOAD_WORKERS` controls concurrent caller requests (default `64`).
+- `TUNNEL_CLIENT_LOAD_MAX_INFLIGHT` controls the tunnel-client queue capacity
+  (default `256`, maximum `10000`).
+- `TUNNEL_CLIENT_LOAD_MCP_CONCURRENCY` controls active MCP dispatch workers
+  (default `64`).
+- `TUNNEL_CLIENT_LOAD_PAYLOAD_BYTES` controls the argument payload size
+  (default `1024`).
+- `TUNNEL_CLIENT_LOAD_REQUEST_TIMEOUT` controls each request timeout
+  (default `30s`).
+
+Normal `go test` runs only a tiny smoke test for this harness; it does not run
+the benchmark unless `-bench` selects it. Results are a loopback local
+upper-bound that includes the local control plane and MCP server, not hosted
+tunnel-service capacity.
+
 ## MCP tunnel proxy test patterns
 
 There are two supported wrapper patterns for tests that start an MCP server and

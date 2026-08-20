@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
+	"os"
 	"testing"
 	"time"
 
@@ -278,14 +278,32 @@ func TestBuildURLBundleUsesTrustedMCPOriginForPrivateRegistration(t *testing.T) 
 	}
 }
 
+func shortUnixSocketListener(t *testing.T) (net.Listener, string) {
+	t.Helper()
+
+	socketFile, err := os.CreateTemp("/tmp", "tunnel-oauth-*.sock")
+	if err != nil {
+		t.Fatalf("create unix socket path: %v", err)
+	}
+	socketPath := socketFile.Name()
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	if err := socketFile.Close(); err != nil {
+		t.Fatalf("close unix socket placeholder: %v", err)
+	}
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatalf("remove unix socket placeholder: %v", err)
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen on unix socket: %v", err)
+	}
+	return listener, socketPath
+}
+
 func TestBuildURLBundleFromPRMDWithAuthServerMetadataOverUnixSocket(t *testing.T) {
 	t.Parallel()
 
-	socketPath := filepath.Join(t.TempDir(), "oauth.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Skipf("unix socket unavailable: %v", err)
-	}
+	listener, socketPath := shortUnixSocketListener(t)
 
 	const (
 		logicalBaseURL = "http://localhost"
@@ -399,11 +417,7 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataOverUnixSocket(t *testing.T
 func TestBuildURLBundleFromPRMDWithAuthServerMetadataLimitsUnixSocketToAuthServerPath(t *testing.T) {
 	t.Parallel()
 
-	socketPath := filepath.Join(t.TempDir(), "oauth.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Skipf("unix socket unavailable: %v", err)
-	}
+	listener, socketPath := shortUnixSocketListener(t)
 
 	const (
 		logicalBaseURL = "http://localhost"
@@ -464,11 +478,7 @@ func TestBuildURLBundleFromPRMDWithAuthServerMetadataLimitsUnixSocketToAuthServe
 func TestBuildURLBundleFromPRMDWithAuthServerMetadataDoesNotPropagateUnixSocketAcrossOrigins(t *testing.T) {
 	t.Parallel()
 
-	socketPath := filepath.Join(t.TempDir(), "oauth.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Skipf("unix socket unavailable: %v", err)
-	}
+	listener, socketPath := shortUnixSocketListener(t)
 
 	const (
 		logicalBaseURL = "http://localhost"

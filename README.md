@@ -125,7 +125,7 @@ make end-user-guide-html
 make end-user-guide-slides
 ```
 
-## For Codex / Claude / Copilot
+## For Codex / Copilot
 
 If you want the shortest supported path from a local or localhost MCP server to
 ChatGPT or Codex, start with `tunnel-client help quickstart`. For Codex plugin

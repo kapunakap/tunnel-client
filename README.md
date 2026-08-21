@@ -294,12 +294,27 @@ matching `.spdx.json` file into the dependency scanner of your choice. Runtime
 releases also publish a matching `*-scan-manifest.json` that binds scanner
 scope, source archives, license evidence, and the release sidecars.
 
-Build the CLI binary:
+Build the CLI binary from a source checkout. The Make target stamps the
+checkout Git SHA into the version sent in `User-Agent` and
+`X-Tunnel-Client-Version`:
 
 ```bash
 make admin-ui
-go build -o bin/tunnel-client ./cmd/client
+make tunnel-client
 ./bin/tunnel-client help quickstart
+```
+
+If you invoke Go directly, stamp the same metadata explicitly:
+
+```bash
+module_path="$(go list -m -f '{{.Path}}')"
+git_sha="$(git rev-parse HEAD)"
+mkdir -p bin
+
+go build \
+  -ldflags "-X ${module_path}/pkg/version.GitSHA=${git_sha}" \
+  -o bin/tunnel-client \
+  ./cmd/client
 ```
 
 ## Narrow runtime artifacts
@@ -352,7 +367,9 @@ Public releases use plain semantic-version tags such as `v0.0.10`. Source
 archives from release tags carry the release version in
 `pkg/version/VERSION`. A plain `go build` from a downloaded release `.tar.gz`
 therefore reports the tag semantic version through `tunnel-client --version`,
-`User-Agent`, and the explicit control-plane version headers.
+`User-Agent`, and the explicit control-plane version headers. Source-checkout
+builds made with the Make target or explicit linker flag above append the Git
+SHA to that semantic version.
 
 Supported release archives also bundle pinned `cloudflared` `2026.7.2` beside
 the CLI for Linux `amd64`/`arm64`, macOS `amd64`/`arm64`, and Windows

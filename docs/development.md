@@ -9,11 +9,25 @@ This document is for contributors working on `tunnel-client`.
 # or
 make admin-ui
 go build ./...
-go build -o bin/tunnel-client ./cmd/client
+make tunnel-client
 ```
 
 Use `./bin/tunnel-client` for local source-checkout runs unless `bin/` is on
-your `PATH`.
+your `PATH`. The Make target stamps the checkout Git SHA into the version sent
+in `User-Agent` and `X-Tunnel-Client-Version`.
+
+If you invoke Go directly, stamp the same metadata explicitly:
+
+```bash
+module_path="$(go list -m -f '{{.Path}}')"
+git_sha="$(git rev-parse HEAD)"
+mkdir -p bin
+
+go build \
+  -ldflags "-X ${module_path}/pkg/version.GitSHA=${git_sha}" \
+  -o bin/tunnel-client \
+  ./cmd/client
+```
 
 Before creating a release tag, stamp the source version so downloaded release
 archives build with the tag semantic version:

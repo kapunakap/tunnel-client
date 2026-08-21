@@ -669,6 +669,8 @@ func TestAppServesHealthAndAdminOverUnixSocket(t *testing.T) {
 	for _, path := range []string{"/healthz", "/api/status", "/api/logs"} {
 		resp, err := client.Get(target.RequestURL(path))
 		require.NoErrorf(t, err, "GET %s", path)
+		_, err = io.Copy(io.Discard, resp.Body)
+		require.NoErrorf(t, err, "read %s response body", path)
 		require.NoError(t, resp.Body.Close())
 		require.Equalf(t, http.StatusOK, resp.StatusCode, "%s response status", path)
 	}

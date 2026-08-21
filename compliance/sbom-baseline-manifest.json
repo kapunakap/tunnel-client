@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "syftVersion": "1.46.0",
-  "goVersion": "go1.26.5",
+  "goVersion": "go1.27.0",
   "environment": {
     "LC_ALL": "C",
     "TZ": "UTC",
@@ -33,13 +33,13 @@
   "baselineScope": "canonical six-platform staged payload union",
   "documents": {
     "tunnel-client.spdx.json": {
-      "sha256": "4978f7877074db301b9ad2a9f6db64c919d879d33d5428204f5f438909bf2f00"
+      "sha256": "cc440a944eff3f0f0625c42229148f7362b868feede9e6abcd5637e091be9b33"
     },
     "tunnel-client-runtime.spdx.json": {
-      "sha256": "95741d431730d6dcf4433b45dc92eba20ef2a5231e213297178322725c923ac3"
+      "sha256": "6779b3b28880799a44570304961a95e04a080dc520bb2044961a16f7ae8b5d74"
     },
     "tunnel-client-runtime-cloudflared.spdx.json": {
-      "sha256": "f94ac35d069a3bde69a7f2c2fa74f273a554b0d2dd1fb63ed4aa9aa41312edb3"
+      "sha256": "19dc8261c195fe4a8acf35043743d21ca7d90d8fb2a27017472b809ebd969d07"
     }
   }
 }

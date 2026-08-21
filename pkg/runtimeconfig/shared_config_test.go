@@ -3205,6 +3205,101 @@ func writeTempClientCertPair(t *testing.T) (string, string) {
 	return certPath, keyPath
 }
 
+func FuzzRuntimeScalarParsers(f *testing.F) {
+	f.Add("X-Test: value", "http://proxy.example.invalid:8080", "1m0s", envTunnelID, "NO_PROXY", "localhost")
+	f.Add("Bad Header: secret", "socks5://proxy.example.invalid:1080", "not-a-duration", "path/unsafe", "UNKNOWN_PROXY_ENV", "value")
+	f.Fuzz(func(t *testing.T, header string, proxy string, duration string, tunnelID string, proxyEnvKey string, proxyEnvValue string) {
+		if len(header) > 512 || len(proxy) > 512 || len(duration) > 128 || len(tunnelID) > 256 || len(proxyEnvKey) > 64 || len(proxyEnvValue) > 512 {
+			t.Skip()
+		}
+
+		key, value, err := parseHeader(header)
+		if err == nil {
+			if key == "" || strings.ContainsAny(key, "\r\n") || strings.ContainsAny(value, "\r\n") {
+				t.Fatalf("accepted invalid header key=%q value=%q", key, value)
+			}
+		}
+
+		proxyURL, err := parseHTTPProxyURL(proxy)
+		if err == nil {
+			if proxyURL == nil || proxyURL.Host == "" || (proxyURL.Scheme != "http" && proxyURL.Scheme != "https") {
+				t.Fatalf("accepted invalid proxy URL %#v", proxyURL)
+			}
+		}
+
+		parsedDuration, err := ParseProxyCheckInterval(duration)
+		if err == nil {
+			roundTrip, roundTripErr := time.ParseDuration(parsedDuration.String())
+			if roundTripErr != nil || roundTrip != parsedDuration {
+				t.Fatalf("duration round-trip failed for %q: parsed=%s round-trip=%s err=%v", duration, parsedDuration, roundTrip, roundTripErr)
+			}
+		}
+
+		if err := ValidateTunnelID(tunnelID); err == nil {
+			if !tunnelIDPattern.MatchString(strings.TrimSpace(tunnelID)) || url.PathEscape(strings.TrimSpace(tunnelID)) != strings.TrimSpace(tunnelID) {
+				t.Fatalf("accepted tunnel ID outside runtime contract: %q", tunnelID)
+			}
+		}
+
+		configured := EnvProxyConfigured(func(name string) (string, bool) {
+			if name != proxyEnvKey {
+				return "", false
+			}
+			return proxyEnvValue, true
+		})
+		wantConfigured := isRuntimeProxyEnvironmentKey(proxyEnvKey) && proxyEnvValue != ""
+		if configured != wantConfigured {
+			t.Fatalf("EnvProxyConfigured(%q=%q) = %t, want %t", proxyEnvKey, proxyEnvValue, configured, wantConfigured)
+		}
+	})
+}
+
+func FuzzRequiredSecretReferences(f *testing.F) {
+	f.Add(uint8(0), "env-secret")
+	f.Add(uint8(1), " file-secret \n")
+	f.Add(uint8(2), "")
+	f.Fuzz(func(t *testing.T, sourceKind uint8, secret string) {
+		if len(secret) > 1024 {
+			t.Skip()
+		}
+		var (
+			raw    string
+			lookup func(string) (string, bool)
+		)
+		if sourceKind%2 == 0 {
+			raw = "env:FUZZ_SECRET"
+			lookup = func(name string) (string, bool) {
+				if name != "FUZZ_SECRET" {
+					return "", false
+				}
+				return secret, true
+			}
+		} else {
+			path := filepath.Join(t.TempDir(), "secret value")
+			if err := os.WriteFile(path, []byte(secret), 0o600); err != nil {
+				t.Fatalf("write fuzz secret: %v", err)
+			}
+			raw = "file:" + path
+			lookup = func(string) (string, bool) { return "", false }
+		}
+
+		got, err := resolveRequiredSecretReference("fuzz.secret", raw, lookup)
+		want := strings.TrimSpace(secret)
+		if want == "" {
+			if err == nil {
+				t.Fatalf("empty secret from %q was accepted as %q", raw, got)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("valid secret reference %q failed: %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("resolved secret = %q, want %q", got, want)
+		}
+	})
+}
+
 func generateTestCertPEM(t *testing.T) []byte {
 	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -3227,6 +3322,15 @@ func generateTestCertPEM(t *testing.T) []byte {
 		t.Fatalf("create certificate: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+}
+
+func isRuntimeProxyEnvironmentKey(key string) bool {
+	switch key {
+	case "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy":
+		return true
+	default:
+		return false
+	}
 }
 
 func equalStringSlices(a, b []string) bool {

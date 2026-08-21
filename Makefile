@@ -60,7 +60,7 @@ CLIENT_STAGE_LICENSE_NAME := $(TARGET)-$(OS)-$(ARCH)-licenses.txt
 RUNTIME_STAGE_LICENSE_NAME := $(RUNTIME_TARGET)-$(OS)-$(ARCH)-licenses.txt
 RUNTIME_CLOUDFLARED_STAGE_LICENSE_NAME := $(RUNTIME_CLOUDFLARED_TARGET)-$(OS)-$(ARCH)-licenses.txt
 
-.PHONY: all help fmt test test-runtime clean clean-client clean-runtime build-image build-image-runtime build-image-runtime-cloudflared mod-tidy admin-ui admin-ui-test release-source-version release-tag end-user-guide-screenshots end-user-guide-html end-user-guide-slides tunnel-client-runtime tunnel-client-runtime-cloudflared runtime runtime-cloudflared sbom sbom-runtime sbom-runtime-cloudflared sbom-baselines verify-sbom-baselines verify-license-reports
+.PHONY: all help fmt test test-runtime test-runtime-release-archive runtime-container-compatibility runtime-k8s-compatibility clean clean-client clean-runtime build-image build-image-runtime build-image-runtime-cloudflared mod-tidy admin-ui admin-ui-test release-source-version release-tag end-user-guide-screenshots end-user-guide-html end-user-guide-slides tunnel-client-runtime tunnel-client-runtime-cloudflared runtime runtime-cloudflared sbom sbom-runtime sbom-runtime-cloudflared sbom-baselines verify-sbom-baselines verify-license-reports
 
 all: clean mod-tidy fmt test $(TARGET)
 
@@ -76,6 +76,9 @@ help:
 	@echo "  runtime-cloudflared - Short alias for $(RUNTIME_CLOUDFLARED_TARGET)"
 	@echo "  test          - Run Go and admin UI tests"
 	@echo "  test-runtime  - Run runtime package and runtime artifact tests"
+	@echo "  test-runtime-release-archive - Package, verify, extract, and smoke-test native runtime ZIP fixtures"
+	@echo "  runtime-container-compatibility - Smoke-test already-built runtime images with hardened mounts"
+	@echo "  runtime-k8s-compatibility - Opt-in kind/k3d deployment smoke for already-built runtime images"
 	@echo "  admin-ui      - Build the admin UI assets (manual; not part of make all)"
 	@echo "  admin-ui-test - Run admin UI tests"
 	@echo "  end-user-guide-screenshots - Capture the local /ui screenshots used by the shareable guide"
@@ -115,9 +118,13 @@ help:
 test: admin-ui-test
 	go test -race ./...
 
-test-runtime: runtime runtime-cloudflared
+test-runtime: runtime runtime-cloudflared test-runtime-release-archive
 	go test ./cmd/client-runtime ./cmd/client-runtime-cloudflared ./pkg/runtimeapp/... ./pkg/runtimeconfig ./pkg/runtimehealth ./pkg/runtimeharpoon/...
 	go test ./e2e -run '^TestRuntime' -count=1
+
+test-runtime-release-archive: runtime runtime-cloudflared
+	./scripts/runtime_release_archive_smoke_test.sh --flavor runtime --binary $(RUNTIME_BIN) --target-os $(OS) --target-arch $(ARCH)
+	./scripts/runtime_release_archive_smoke_test.sh --flavor runtime-cloudflared --binary $(RUNTIME_CLOUDFLARED_BIN) --target-os $(OS) --target-arch $(ARCH)
 
 mod-tidy:
 	go mod tidy
@@ -227,6 +234,14 @@ build-image-runtime-cloudflared:
 	@if [ "$(GIT_SHA)" != "" ]; then \
 		docker tag $(RUNTIME_CLOUDFLARED_IMAGE_NAME):$(IMAGE_TAG) $(RUNTIME_CLOUDFLARED_IMAGE_NAME):latest; \
 	fi
+
+runtime-container-compatibility:
+	./scripts/runtime_container_compatibility_test.sh --skip-if-unavailable --flavor runtime --image $(RUNTIME_IMAGE_NAME):$(IMAGE_TAG)
+	./scripts/runtime_container_compatibility_test.sh --skip-if-unavailable --flavor runtime-cloudflared --image $(RUNTIME_CLOUDFLARED_IMAGE_NAME):$(IMAGE_TAG)
+
+runtime-k8s-compatibility:
+	./scripts/runtime_k8s_compatibility_test.sh --skip-if-unavailable --flavor runtime --image $(RUNTIME_IMAGE_NAME):$(IMAGE_TAG)
+	./scripts/runtime_k8s_compatibility_test.sh --skip-if-unavailable --flavor runtime-cloudflared --image $(RUNTIME_CLOUDFLARED_IMAGE_NAME):$(IMAGE_TAG)
 
 sbom: $(TARGET)
 	rm -rf $(CLIENT_STAGE_DIR)

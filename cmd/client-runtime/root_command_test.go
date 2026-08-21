@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
 	"github.com/openai/tunnel-client/pkg/runtimecli"
+	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 	"github.com/openai/tunnel-client/pkg/version"
 )
 
@@ -84,6 +86,19 @@ func TestRuntimeRunHelpOmitsFullAndCloudflaredFlags(t *testing.T) {
 	} {
 		require.NotContains(t, stdout, excluded)
 	}
+}
+
+func TestRuntimeRunCommandMatchesCanonicalCobraFlagSurface(t *testing.T) {
+	root := newRootCommand(func(string) (string, bool) { return "", false }, io.Discard, io.Discard)
+	run, _, err := root.Find([]string{"run"})
+	require.NoError(t, err)
+	run.InitDefaultHelpFlag()
+
+	expected := &cobra.Command{Use: "run"}
+	runtimeconfig.RegisterFlags(expected.Flags(), runtimeconfig.FlavorRuntime)
+	expected.InitDefaultHelpFlag()
+
+	require.Equal(t, expected.Flags().FlagUsages(), run.Flags().FlagUsages())
 }
 
 func TestRuntimeRejectsUIFlagAndProfileKey(t *testing.T) {

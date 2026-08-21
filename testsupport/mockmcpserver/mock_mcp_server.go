@@ -61,10 +61,11 @@ type IncomingRequest struct {
 
 // IncomingHTTPRequest captures an HTTP request received by the mock server.
 type IncomingHTTPRequest struct {
-	Method  string
-	Path    string
-	Headers http.Header
-	Body    []byte
+	Method   string
+	Path     string
+	RawQuery string
+	Headers  http.Header
+	Body     []byte
 }
 
 // MockMCPServer hosts a Streamable HTTP MCP server backed by scripted tool handlers.
@@ -583,10 +584,11 @@ func (m *MockMCPServer) ReceivedHTTPRequests() []IncomingHTTPRequest {
 	out := make([]IncomingHTTPRequest, len(m.httpSeen))
 	for i, req := range m.httpSeen {
 		out[i] = IncomingHTTPRequest{
-			Method:  req.Method,
-			Path:    req.Path,
-			Headers: cloneHeader(req.Headers),
-			Body:    bytes.Clone(req.Body),
+			Method:   req.Method,
+			Path:     req.Path,
+			RawQuery: req.RawQuery,
+			Headers:  cloneHeader(req.Headers),
+			Body:     bytes.Clone(req.Body),
 		}
 	}
 	return out
@@ -599,14 +601,17 @@ func (m *MockMCPServer) recordHTTPRequest(req *http.Request, body []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	path := ""
+	rawQuery := ""
 	if req.URL != nil {
 		path = req.URL.Path
+		rawQuery = req.URL.RawQuery
 	}
 	m.httpSeen = append(m.httpSeen, IncomingHTTPRequest{
-		Method:  req.Method,
-		Path:    path,
-		Headers: req.Header.Clone(),
-		Body:    bytes.Clone(body),
+		Method:   req.Method,
+		Path:     path,
+		RawQuery: rawQuery,
+		Headers:  req.Header.Clone(),
+		Body:     bytes.Clone(body),
 	})
 }
 

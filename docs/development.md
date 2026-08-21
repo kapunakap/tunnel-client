@@ -125,6 +125,42 @@ the benchmark unless `-bench` selects it. Results are a loopback local
 upper-bound that includes the local control plane and MCP server, not hosted
 tunnel-service capacity.
 
+The host-binary runtime replacement checks use the same in-repo fake services
+while launching the real full-client, runtime, and runtime-cloudflared
+binaries:
+
+```bash
+make test-runtime
+```
+
+That target includes shared flag/config/profile/environment parity, real
+host-binary behavior comparisons, and native release-ZIP execution smoke. The
+ZIP portion verifies packaging, extraction, flavor/version output, and
+`run --help`; it does not run the extracted ZIP binary against the fake
+services.
+
+To smoke-test already-built runtime images with read-only
+ConfigMap/Secret-style mounts, non-root execution, and both default and
+explicit entrypoints, run:
+
+```bash
+make build-image-runtime build-image-runtime-cloudflared
+make runtime-container-compatibility
+```
+
+The Kubernetes deployment smoke is deliberately opt-in because it needs a
+local Docker daemon and `kind` or `k3d`:
+
+```bash
+TUNNEL_CLIENT_RUNTIME_K8S_COMPAT=1 make runtime-k8s-compatibility
+```
+
+Only the host-binary parity lane uses the in-repo fake services. The ZIP,
+container, and Kubernetes lanes are packaging/deployment smokes; the
+container and Kubernetes profiles intentionally use unreachable local
+endpoints, so those lanes do not establish full-client behavioral parity or
+`/readyz` readiness. None of the lanes contacts external services.
+
 ## MCP tunnel proxy test patterns
 
 There are two supported wrapper patterns for tests that start an MCP server and

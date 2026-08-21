@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -33,6 +34,26 @@ import (
 	"github.com/openai/tunnel-client/pkg/healthurl"
 	"github.com/openai/tunnel-client/pkg/types"
 )
+
+func TestRootCommandContextCancelsOnSIGTERM(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGTERM is not available on Windows")
+	}
+
+	ctx, stop := newRootCommandContext()
+	defer stop()
+
+	process, err := os.FindProcess(os.Getpid())
+	require.NoError(t, err)
+	require.NoError(t, process.Signal(syscall.SIGTERM))
+
+	select {
+	case <-ctx.Done():
+		require.ErrorIs(t, ctx.Err(), context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("root command context did not cancel after SIGTERM")
+	}
+}
 
 func TestAppBoots(t *testing.T) {
 	tempDir := t.TempDir()

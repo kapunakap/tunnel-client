@@ -363,6 +363,25 @@ To build the corresponding Linux images, use `make build-image-runtime` and
 `make build-image-runtime-cloudflared`; the Cloudflare image includes its pinned
 companion and both images use `run` as their entrypoint.
 
+Contributors can run the compatibility suite with `make test-runtime`. Its
+host-binary checks compare the full client and runtime flavors with the same
+profile bytes, environment, flags, local control-plane/MCP/OAuth/proxy/TLS
+fixtures, and shutdown signal. The same target also packages native
+release-shaped ZIPs and checks that they verify, extract, identify the expected
+flavor, and expose `run --help`; that ZIP smoke is not a second fake-service
+parity run.
+
+After building the runtime images, `make runtime-container-compatibility`
+runs a deployment smoke for their default and overridden entrypoints with
+read-only profile/Secret mounts and hardened container settings. It uses
+intentionally unreachable local endpoints to check startup surfaces and
+SIGTERM, not to compare image behavior with the full client or assert
+`/readyz` readiness. An optional local Kubernetes deployment smoke is
+available with `TUNNEL_CLIENT_RUNTIME_K8S_COMPAT=1 make
+runtime-k8s-compatibility`; it requires Docker plus `kind` or `k3d`, checks
+the runtime Pods' mounted profile/Secret and `/healthz` surface, and does not
+contact external services.
+
 Public releases use plain semantic-version tags such as `v0.0.10`. Source
 archives from release tags carry the release version in
 `pkg/version/VERSION`. A plain `go build` from a downloaded release `.tar.gz`

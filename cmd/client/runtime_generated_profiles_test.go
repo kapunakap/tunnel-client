@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 
+	"github.com/openai/tunnel-client/pkg/config"
 	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
 
@@ -46,7 +48,22 @@ func TestRuntimeAcceptsFullClientGeneratedProfiles(t *testing.T) {
 			require.Equal(t, profilePath, cfg.Runtime.ProfilePath)
 			require.Equal(t, profileDir, cfg.Runtime.ProfileDir)
 			require.False(t, cfg.Runtime.ProfileFile)
+			require.True(t, bytes.Equal(generated, cfg.Runtime.ConfigFileContents), "runtime changed generated profile bytes")
 			require.NotEmpty(t, cfg.MCP.ChannelBindings)
+
+			full, err := config.Load([]string{
+				"--profile", sample.Name,
+				"--profile-dir", profileDir,
+			}, runtimeGeneratedProfileLookupEnv(env))
+			require.NoErrorf(t, err, "full client rejected generated profile %s", sample.Name)
+			require.True(t, bytes.Equal(generated, full.Runtime.ConfigFileContents), "full client changed generated profile bytes")
+
+			cloudflaredRuntime, err := runtimeconfig.Load([]string{
+				"--profile", sample.Name,
+				"--profile-dir", profileDir,
+			}, runtimeconfig.FlavorRuntimeCloudflared, runtimeGeneratedProfileLookupEnv(env))
+			require.NoErrorf(t, err, "runtime-cloudflared rejected generated profile %s", sample.Name)
+			require.True(t, bytes.Equal(generated, cloudflaredRuntime.Runtime.ConfigFileContents), "runtime-cloudflared changed generated profile bytes")
 		})
 	}
 }

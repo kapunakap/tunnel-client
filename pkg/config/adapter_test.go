@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -11,9 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/pflag"
 
 	"github.com/openai/tunnel-client/pkg/runtimeconfig"
 )
@@ -22,6 +26,97 @@ const (
 	adapterTestTunnelID = "tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	adapterTestAPIKey   = "sk_test_key"
 )
+
+var (
+	fullOnlyAdapterFlags = []string{
+		"admin-ui.log-buffer-events",
+		"allow-remote-ui",
+		"harpoon.capture-payloads",
+		"open-web-ui",
+		"proxy.check-interval",
+	}
+	cloudflaredAdapterFlags = []string{
+		"cloudflared.managed",
+		"cloudflared.path",
+		"cloudflared.ready-timeout",
+		"cloudflared.token",
+	}
+	adapterSharedEnvironmentVariables = []string{
+		"CA_BUNDLE",
+		"CONTROL_PLANE_API_KEY",
+		"CONTROL_PLANE_BASE_URL",
+		"CONTROL_PLANE_CLIENT_CERT",
+		"CONTROL_PLANE_CLIENT_KEY",
+		"CONTROL_PLANE_EXTRA_HEADERS",
+		"CONTROL_PLANE_HTTP_PROXY",
+		"CONTROL_PLANE_MAX_INFLIGHT_REQUESTS",
+		"CONTROL_PLANE_ORGANIZATION_ID",
+		"CONTROL_PLANE_POLL_CHANNELS",
+		"CONTROL_PLANE_POLL_DEADLINE_GUARDRAIL",
+		"CONTROL_PLANE_POLL_TIMEOUT",
+		"CONTROL_PLANE_TUNNEL_ID",
+		"CONTROL_PLANE_URL_PATH",
+		"HARPOON_ADDITIONAL_TRANSPORTS",
+		"HARPOON_ALLOW_PLAINTEXT_HTTP",
+		"HARPOON_HOSTS_INCLUDE_LOOPBACK",
+		"HARPOON_HOSTS_INCLUDE_PRIVATE",
+		"HARPOON_HOSTS_INCLUDE_REGEX",
+		"HARPOON_HOSTS_INCLUDE_SUFFIX",
+		"HARPOON_HTTP_PROXY",
+		"HARPOON_MAX_REDIRECTS",
+		"HARPOON_MAX_RESPONSE_BYTES",
+		"HARPOON_TARGETS",
+		"HEALTH_LISTEN_ADDR",
+		"HEALTH_UNIX_SOCKET",
+		"HEALTH_URL_FILE",
+		"HOME",
+		"LOG_FILE",
+		"LOG_FORMAT",
+		"LOG_HTTP_RAW_UNSAFE",
+		"LOG_LEVEL",
+		"MCP_CLIENT_CERT",
+		"MCP_CLIENT_KEY",
+		"MCP_COMMAND",
+		"MCP_CONNECTION_MAX_TTL",
+		"MCP_DISCOVERY_EXTRA_HEADERS",
+		"MCP_EXTRA_HEADERS",
+		"MCP_HTTP_PROXY",
+		"MCP_MAX_CONCURRENT_REQUESTS",
+		"MCP_SERVER_URL",
+		"MCP_STARTUP_WAIT_TIMEOUT",
+		"OPENAI_API_KEY",
+		"PID_FILE",
+		"TUNNEL_CLIENT_CONFIG",
+		"TUNNEL_CLIENT_HTTP_PROXY",
+		"TUNNEL_CLIENT_PROFILE",
+		"TUNNEL_CLIENT_PROFILE_DIR",
+		"TUNNEL_CLIENT_PROFILE_FILE",
+		"XDG_CONFIG_HOME",
+	}
+	// Standard proxy variables are not projected into Config by Load. They are
+	// consumed by the shared EnvProxyConfigured helper, so keep their contract
+	// inventory separate from loader environment coverage above.
+	adapterStandardProxyEnvironmentVariables = []string{
+		"HTTP_PROXY",
+		"http_proxy",
+		"HTTPS_PROXY",
+		"https_proxy",
+		"NO_PROXY",
+		"no_proxy",
+	}
+)
+
+type adapterFlagSurface struct {
+	name                string
+	shorthand           string
+	usage               string
+	defValue            string
+	noOptDefVal         string
+	valueType           string
+	hidden              bool
+	deprecated          string
+	shorthandDeprecated string
+}
 
 func TestFullAdapterCoversEveryRuntimeConfigField(t *testing.T) {
 	runtimeType := reflect.TypeOf(runtimeconfig.Config{})
@@ -86,6 +181,53 @@ func TestFullAdapterCopiesEveryRuntimeConfigFieldValue(t *testing.T) {
 			t.Fatalf("full Harpoon adapter did not copy runtime field %q", runtimeField.Name)
 		}
 	}
+}
+
+func TestRuntimeCoreFromFullCopiesEveryRuntimeConfigFieldValue(t *testing.T) {
+	coreValue := adapterSentinelValue(t, reflect.TypeOf(runtimeconfig.Config{}), 1)
+	core := coreValue.Interface().(runtimeconfig.Config)
+	full := fullConfigFromRuntime(&core, CloudflaredConfig{}, AdminUIConfig{}, false, ProxyHealthConfig{})
+	roundTrip := runtimeCoreFromFull(full)
+
+	if !adapterValuesEqual(reflect.ValueOf(roundTrip), reflect.ValueOf(core)) {
+		t.Fatalf("runtimeCoreFromFull did not preserve every shared runtime field:\nround-trip: %#v\noriginal: %#v", roundTrip, core)
+	}
+}
+
+func TestFullConfigAddsOnlyExplicitFullOnlyFields(t *testing.T) {
+	runtimeFields := exportedFieldNames(reflect.TypeOf(runtimeconfig.Config{}))
+	fullFields := exportedFieldNames(reflect.TypeOf(Config{}))
+	delete(runtimeFields, "Harpoon")
+	delete(fullFields, "Harpoon")
+	if got := sortedFieldDifference(fullFields, runtimeFields); !reflect.DeepEqual(got, []string{"AdminUI", "Cloudflared", "ProxyHealth"}) {
+		t.Fatalf("full Config adds fields %v, want only [AdminUI Cloudflared ProxyHealth]", got)
+	}
+
+	runtimeHarpoonFields := exportedFieldNames(reflect.TypeOf(runtimeconfig.HarpoonConfig{}))
+	fullHarpoonFields := exportedFieldNames(reflect.TypeOf(HarpoonConfig{}))
+	if got := sortedFieldDifference(fullHarpoonFields, runtimeHarpoonFields); !reflect.DeepEqual(got, []string{"CapturePayloads"}) {
+		t.Fatalf("full HarpoonConfig adds fields %v, want only [CapturePayloads]", got)
+	}
+}
+
+func TestFullAndRuntimeFlagSurfacesDifferOnlyByExplicitExtensions(t *testing.T) {
+	fullFlags := pflag.NewFlagSet("full", pflag.ContinueOnError)
+	RegisterFlags(fullFlags)
+	runtimeFlags := pflag.NewFlagSet("runtime", pflag.ContinueOnError)
+	runtimeconfig.RegisterFlags(runtimeFlags, runtimeconfig.FlavorRuntime)
+	runtimeCloudflaredFlags := pflag.NewFlagSet("runtime-cloudflared", pflag.ContinueOnError)
+	runtimeconfig.RegisterFlags(runtimeCloudflaredFlags, runtimeconfig.FlavorRuntimeCloudflared)
+
+	fullSurface := adapterFlagSurfaceSnapshot(fullFlags)
+	runtimeSurface := adapterFlagSurfaceSnapshot(runtimeFlags)
+	runtimeCloudflaredSurface := adapterFlagSurfaceSnapshot(runtimeCloudflaredFlags)
+
+	assertAdapterFlagSurfaceSubset(t, runtimeSurface, runtimeCloudflaredSurface)
+	assertAdapterFlagSurfaceSubset(t, runtimeSurface, fullSurface)
+	assertAdapterFlagSurfaceSubset(t, runtimeCloudflaredSurface, fullSurface)
+	assertAdapterFlagSurfaceAddsExactly(t, runtimeCloudflaredSurface, runtimeSurface, cloudflaredAdapterFlags)
+	assertAdapterFlagSurfaceAddsExactly(t, fullSurface, runtimeCloudflaredSurface, fullOnlyAdapterFlags)
+	assertAdapterFlagSurfaceAddsExactly(t, fullSurface, runtimeSurface, append(append([]string{}, cloudflaredAdapterFlags...), fullOnlyAdapterFlags...))
 }
 
 func adapterSentinelValue(t *testing.T, typ reflect.Type, seed int) reflect.Value {
@@ -218,6 +360,74 @@ func adapterValuesEqual(got reflect.Value, want reflect.Value) bool {
 	}
 }
 
+func exportedFieldNames(typ reflect.Type) map[string]struct{} {
+	fields := make(map[string]struct{}, typ.NumField())
+	for field := range typ.Fields() {
+		if field.PkgPath == "" {
+			fields[field.Name] = struct{}{}
+		}
+	}
+	return fields
+}
+
+func sortedFieldDifference(left map[string]struct{}, right map[string]struct{}) []string {
+	difference := make([]string, 0)
+	for name := range left {
+		if _, ok := right[name]; !ok {
+			difference = append(difference, name)
+		}
+	}
+	sort.Strings(difference)
+	return difference
+}
+
+func adapterFlagSurfaceSnapshot(fs *pflag.FlagSet) map[string]adapterFlagSurface {
+	surface := make(map[string]adapterFlagSurface)
+	fs.VisitAll(func(flag *pflag.Flag) {
+		surface[flag.Name] = adapterFlagSurface{
+			name:                flag.Name,
+			shorthand:           flag.Shorthand,
+			usage:               flag.Usage,
+			defValue:            flag.DefValue,
+			noOptDefVal:         flag.NoOptDefVal,
+			valueType:           flag.Value.Type(),
+			hidden:              flag.Hidden,
+			deprecated:          flag.Deprecated,
+			shorthandDeprecated: flag.ShorthandDeprecated,
+		}
+	})
+	return surface
+}
+
+func assertAdapterFlagSurfaceSubset(t *testing.T, want map[string]adapterFlagSurface, got map[string]adapterFlagSurface) {
+	t.Helper()
+	for name, wantFlag := range want {
+		gotFlag, ok := got[name]
+		if !ok {
+			t.Fatalf("flag surface is missing shared flag %q", name)
+		}
+		if !reflect.DeepEqual(gotFlag, wantFlag) {
+			t.Fatalf("flag %q metadata differs:\nwant: %#v\ngot:  %#v", name, wantFlag, gotFlag)
+		}
+	}
+}
+
+func assertAdapterFlagSurfaceAddsExactly(t *testing.T, larger map[string]adapterFlagSurface, smaller map[string]adapterFlagSurface, want []string) {
+	t.Helper()
+	got := make([]string, 0)
+	for name := range larger {
+		if _, ok := smaller[name]; !ok {
+			got = append(got, name)
+		}
+	}
+	sort.Strings(got)
+	want = append([]string(nil), want...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("flag surface adds %v, want exactly %v", got, want)
+	}
+}
+
 func TestFullAndRuntimeLoadSharedEffectiveConfigParity(t *testing.T) {
 	profile := writeAdapterConfig(t, `
 config_version: 1
@@ -271,18 +481,16 @@ health:
 			},
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			lookup := lookupEnvMap(tc.env)
-			full, err := Load(tc.args, lookup)
-			if err != nil {
-				t.Fatalf("full Load returned error: %v", err)
+	for _, flavor := range adapterRuntimeFlavors() {
+		flavor := flavor
+		t.Run(string(flavor), func(t *testing.T) {
+			for _, tc := range cases {
+				tc := tc
+				t.Run(tc.name, func(t *testing.T) {
+					full, runtime := loadParityPairForFlavor(t, tc.args, lookupEnvMap(tc.env), flavor)
+					assertSharedRuntimeParity(t, full, runtime)
+				})
 			}
-			runtime, err := runtimeconfig.Load(tc.args, runtimeconfig.FlavorRuntime, lookup)
-			if err != nil {
-				t.Fatalf("runtime Load returned error: %v", err)
-			}
-			assertSharedRuntimeParity(t, full, runtime)
 		})
 	}
 }
@@ -300,18 +508,24 @@ func TestFullAndRuntimeAcceptDefaultEquivalentFullOnlyEnvironment(t *testing.T) 
 		{name: "PROXY_CHECK_INTERVAL", value: "1m0s"},
 		{name: "HARPOON_CAPTURE_PAYLOADS", value: "false"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
-			args := []string{
-				"--control-plane.tunnel-id", adapterTestTunnelID,
-				"--mcp.server-url", "https://mcp.example.invalid/mcp",
+	for _, flavor := range adapterRuntimeFlavors() {
+		flavor := flavor
+		t.Run(string(flavor), func(t *testing.T) {
+			for _, tc := range cases {
+				tc := tc
+				t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+					args := []string{
+						"--control-plane.tunnel-id", adapterTestTunnelID,
+						"--mcp.server-url", "https://mcp.example.invalid/mcp",
+					}
+					lookup := lookupEnvMap(map[string]string{
+						"CONTROL_PLANE_API_KEY": adapterTestAPIKey,
+						tc.name:                 tc.value,
+					})
+					full, runtime := loadParityPairForFlavor(t, args, lookup, flavor)
+					assertSharedRuntimeParity(t, full, runtime)
+				})
 			}
-			lookup := lookupEnvMap(map[string]string{
-				"CONTROL_PLANE_API_KEY": adapterTestAPIKey,
-				tc.name:                 tc.value,
-			})
-			full, runtime := loadParityPair(t, args, lookup)
-			assertSharedRuntimeParity(t, full, runtime)
 		})
 	}
 }
@@ -347,8 +561,13 @@ func TestFullAndRuntimeSharedProductionInputsParity(t *testing.T) {
 			"MCP_PROXY":             "http://mcp-proxy.example.invalid:8080",
 			"HARPOON_PROXY":         "http://harpoon-proxy.example.invalid:8080",
 		})
-		full, runtime := loadParityPair(t, args, lookup)
-		assertSharedRuntimeParity(t, full, runtime)
+		for _, flavor := range adapterRuntimeFlavors() {
+			flavor := flavor
+			t.Run(string(flavor), func(t *testing.T) {
+				full, runtime := loadParityPairForFlavor(t, args, lookup, flavor)
+				assertSharedRuntimeParity(t, full, runtime)
+			})
+		}
 	})
 
 	t.Run("profile secret references TLS and mounted paths", func(t *testing.T) {
@@ -393,14 +612,344 @@ health:
 process:
   pid_file: relative/client.pid
 `)
-		full, runtime := loadParityPair(t, []string{"--config", profile}, lookupEnvMap(nil))
+		for _, flavor := range adapterRuntimeFlavors() {
+			flavor := flavor
+			t.Run(string(flavor), func(t *testing.T) {
+				full, runtime := loadParityPairForFlavor(t, []string{"--config", profile}, lookupEnvMap(nil), flavor)
+				assertSharedRuntimeParity(t, full, runtime)
+				if full.TLS == nil || full.TLS.Path != relativeCertPath {
+					t.Fatalf("full TLS path = %#v, want %q", full.TLS, relativeCertPath)
+				}
+				if full.Health.URLFile != "relative/health.url" || full.Process.PIDFile != "relative/client.pid" {
+					t.Fatalf("relative mounted paths changed: health=%q pid=%q", full.Health.URLFile, full.Process.PIDFile)
+				}
+			})
+		}
+	})
+}
+
+func TestFullAndRuntimeFlavorsPreserveExactProfileBytes(t *testing.T) {
+	raw := []byte("# bytes are retained for diagnostics\n\nconfig_version: 1\ncontrol_plane:\n  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n  api_key: env:CONTROL_PLANE_API_KEY\nmcp:\n  server_urls:\n    - url: https://mcp.example.invalid/mcp\nadmin_ui:\n  allow_remote: false\n  open_browser: false\n  log_buffer_events: 2000\nharpoon:\n  capture_payloads: false\nproxy:\n  check_interval: 1m0s\n\n")
+	profile := writeAdapterConfigBytes(t, raw)
+	lookup := lookupEnvMap(map[string]string{"CONTROL_PLANE_API_KEY": adapterTestAPIKey})
+
+	for _, flavor := range adapterRuntimeFlavors() {
+		flavor := flavor
+		t.Run(string(flavor), func(t *testing.T) {
+			full, runtime := loadParityPairForFlavor(t, []string{"--config", profile}, lookup, flavor)
+			assertSharedRuntimeParity(t, full, runtime)
+			if !bytes.Equal(full.Runtime.ConfigFileContents, raw) {
+				t.Fatalf("full config bytes changed:\nwant: %q\ngot:  %q", raw, full.Runtime.ConfigFileContents)
+			}
+			if !bytes.Equal(runtime.Runtime.ConfigFileContents, raw) {
+				t.Fatalf("%s config bytes changed:\nwant: %q\ngot:  %q", flavor, raw, runtime.Runtime.ConfigFileContents)
+			}
+		})
+	}
+}
+
+func TestFullAndRuntimeCloudflaredPreserveSharedConfigAndCompanionSettings(t *testing.T) {
+	raw := []byte("config_version: 1\ncontrol_plane:\n  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n  api_key: env:CONTROL_PLANE_API_KEY\nmcp:\n  server_urls:\n    - url: https://mcp.example.invalid/mcp\ncloudflared:\n  token: env:PROFILE_CLOUDFLARED_TOKEN\n  managed: false\n  path: /profile/cloudflared\n  ready_timeout: 20s\n")
+	profile := writeAdapterConfigBytes(t, raw)
+	args := []string{"--config", profile, "--cloudflared.path", "/flag/cloudflared"}
+	lookup := lookupEnvMap(map[string]string{
+		"CONTROL_PLANE_API_KEY":     adapterTestAPIKey,
+		"PROFILE_CLOUDFLARED_TOKEN": "profile-token",
+		"CLOUDFLARED_READY_TIMEOUT": "17s",
+	})
+	full, runtimeCloudflared := loadRuntimeCloudflaredParityPair(t, args, lookup)
+
+	assertSharedRuntimeParity(t, full, &runtimeCloudflared.Runtime)
+	if !reflect.DeepEqual(full.Cloudflared, runtimeCloudflared.Cloudflared) {
+		t.Fatalf("cloudflared effective config differs:\nfull: %#v\nruntime-cloudflared: %#v", full.Cloudflared, runtimeCloudflared.Cloudflared)
+	}
+	if !bytes.Equal(full.Runtime.ConfigFileContents, raw) || !bytes.Equal(runtimeCloudflared.Runtime.Runtime.ConfigFileContents, raw) {
+		t.Fatalf("cloudflared profile bytes changed:\nwant: %q\nfull: %q\nruntime-cloudflared: %q", raw, full.Runtime.ConfigFileContents, runtimeCloudflared.Runtime.Runtime.ConfigFileContents)
+	}
+}
+
+func TestFullAndRuntimeCloudflaredEnvironmentParity(t *testing.T) {
+	lookup := lookupEnvMap(map[string]string{
+		"CONTROL_PLANE_API_KEY":     adapterTestAPIKey,
+		"CONTROL_PLANE_TUNNEL_ID":   adapterTestTunnelID,
+		"MCP_SERVER_URL":            "https://mcp.example.invalid/mcp",
+		"CLOUDFLARED_TUNNEL_TOKEN":  "env-token",
+		"CLOUDFLARED_MANAGED":       "true",
+		"CLOUDFLARED_PATH":          "/env/cloudflared",
+		"CLOUDFLARED_READY_TIMEOUT": "23s",
+	})
+	full, runtimeCloudflared := loadRuntimeCloudflaredParityPair(t, nil, lookup)
+
+	assertSharedRuntimeParity(t, full, &runtimeCloudflared.Runtime)
+	if !reflect.DeepEqual(full.Cloudflared, runtimeCloudflared.Cloudflared) {
+		t.Fatalf("cloudflared environment config differs:\nfull: %#v\nruntime-cloudflared: %#v", full.Cloudflared, runtimeCloudflared.Cloudflared)
+	}
+}
+
+func TestFullAndRuntimeFlavorsSharedEnvironmentParity(t *testing.T) {
+	certPath, keyPath := writeAdapterClientCertificate(t)
+	sharedProfile := []byte("config_version: 1\ncontrol_plane:\n  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n  api_key: env:CONTROL_PLANE_API_KEY\nmcp:\n  server_urls:\n    - url: https://mcp.example.invalid/mcp\n")
+	configPath := writeAdapterConfigBytes(t, sharedProfile)
+	profileDir := t.TempDir()
+	profilePath := filepath.Join(profileDir, "named.yaml")
+	writeAdapterProfileFile(t, profilePath, sharedProfile)
+	xdgConfigHome := t.TempDir()
+	writeAdapterProfileFile(
+		t,
+		filepath.Join(xdgConfigHome, "tunnel-client", "xdg-default.yaml"),
+		sharedProfile,
+	)
+	homeDir := t.TempDir()
+	writeAdapterProfileFile(
+		t,
+		filepath.Join(homeDir, ".config", "tunnel-client", "home-default.yaml"),
+		sharedProfile,
+	)
+	writeAdapterProfileFile(
+		t,
+		filepath.Join(homeDir, "profiles", "tilde-dir.yaml"),
+		sharedProfile,
+	)
+	writeAdapterProfileFile(
+		t,
+		filepath.Join(homeDir, "profiles", "tilde-file.yaml"),
+		sharedProfile,
+	)
+
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{
+			name: "scalar repeated and channel settings",
+			env: map[string]string{
+				"CONTROL_PLANE_API_KEY":                 adapterTestAPIKey,
+				"CONTROL_PLANE_BASE_URL":                "https://control.example.invalid",
+				"CONTROL_PLANE_URL_PATH":                "/gateway",
+				"CONTROL_PLANE_TUNNEL_ID":               adapterTestTunnelID,
+				"CONTROL_PLANE_ORGANIZATION_ID":         "org-test",
+				"CONTROL_PLANE_MAX_INFLIGHT_REQUESTS":   "17",
+				"CONTROL_PLANE_POLL_TIMEOUT":            "45s",
+				"CONTROL_PLANE_POLL_DEADLINE_GUARDRAIL": "500ms",
+				"CONTROL_PLANE_POLL_CHANNELS":           "main,tools,harpoon",
+				"CONTROL_PLANE_EXTRA_HEADERS":           "X-Control: control",
+				"LOG_LEVEL":                             "debug",
+				"LOG_FORMAT":                            "json",
+				"LOG_FILE":                              "relative/client.log",
+				"LOG_HTTP_RAW_UNSAFE":                   "true",
+				"HEALTH_LISTEN_ADDR":                    "127.0.0.1:7777",
+				"HEALTH_URL_FILE":                       "relative/health.url",
+				"PID_FILE":                              "relative/client.pid",
+				"MCP_SERVER_URL":                        "channel=main,url=https://main-mcp.example.invalid/mcp",
+				"MCP_COMMAND":                           "command=echo hello,channel=tools",
+				"MCP_EXTRA_HEADERS":                     "X-MCP: mcp",
+				"MCP_DISCOVERY_EXTRA_HEADERS":           "X-Discovery: discovery",
+				"MCP_STARTUP_WAIT_TIMEOUT":              "2s",
+				"MCP_CONNECTION_MAX_TTL":                "30s",
+				"MCP_MAX_CONCURRENT_REQUESTS":           "7",
+				"HARPOON_TARGETS":                       "label=auth,url=https://auth.example.invalid/token",
+				"HARPOON_ALLOW_PLAINTEXT_HTTP":          "false",
+				"HARPOON_MAX_RESPONSE_BYTES":            "2048",
+				"HARPOON_MAX_REDIRECTS":                 "3",
+				"HARPOON_ADDITIONAL_TRANSPORTS":         "http-streamable",
+				"HARPOON_HOSTS_INCLUDE_SUFFIX":          "internal.example;corp.example",
+				"HARPOON_HOSTS_INCLUDE_REGEX":           "^internal\\.example$",
+				"HARPOON_HOSTS_INCLUDE_LOOPBACK":        "false",
+				"HARPOON_HOSTS_INCLUDE_PRIVATE":         "false",
+			},
+		},
+		{
+			name: "TLS and component proxies",
+			env: map[string]string{
+				"CONTROL_PLANE_API_KEY":     adapterTestAPIKey,
+				"CONTROL_PLANE_TUNNEL_ID":   adapterTestTunnelID,
+				"MCP_SERVER_URL":            "https://mcp.example.invalid/mcp",
+				"CA_BUNDLE":                 certPath,
+				"TUNNEL_CLIENT_HTTP_PROXY":  "http://global-proxy.example.invalid:8080",
+				"CONTROL_PLANE_CLIENT_CERT": certPath,
+				"CONTROL_PLANE_CLIENT_KEY":  keyPath,
+				"CONTROL_PLANE_HTTP_PROXY":  "http://control-proxy.example.invalid:8080",
+				"MCP_CLIENT_CERT":           certPath,
+				"MCP_CLIENT_KEY":            keyPath,
+				"MCP_HTTP_PROXY":            "http://mcp-proxy.example.invalid:8080",
+				"HARPOON_HTTP_PROXY":        "http://harpoon-proxy.example.invalid:8080",
+			},
+		},
+		{
+			name: "global proxy only",
+			env: map[string]string{
+				"CONTROL_PLANE_API_KEY":    adapterTestAPIKey,
+				"CONTROL_PLANE_TUNNEL_ID":  adapterTestTunnelID,
+				"MCP_SERVER_URL":           "https://mcp.example.invalid/mcp",
+				"TUNNEL_CLIENT_HTTP_PROXY": "http://global-proxy.example.invalid:8080",
+			},
+		},
+		{
+			name: "openai fallback and unix health",
+			env: map[string]string{
+				"OPENAI_API_KEY":          adapterTestAPIKey,
+				"CONTROL_PLANE_TUNNEL_ID": adapterTestTunnelID,
+				"MCP_SERVER_URL":          "https://mcp.example.invalid/mcp",
+				"HEALTH_UNIX_SOCKET":      filepath.Join(t.TempDir(), "health.sock"),
+			},
+		},
+		{
+			name: "config selector",
+			env: map[string]string{
+				"TUNNEL_CLIENT_CONFIG":  configPath,
+				"CONTROL_PLANE_API_KEY": adapterTestAPIKey,
+			},
+		},
+		{
+			name: "named profile selector",
+			env: map[string]string{
+				"TUNNEL_CLIENT_PROFILE":     "named",
+				"TUNNEL_CLIENT_PROFILE_DIR": profileDir,
+				"CONTROL_PLANE_API_KEY":     adapterTestAPIKey,
+			},
+		},
+		{
+			name: "named profile selector through XDG default directory",
+			env: map[string]string{
+				"TUNNEL_CLIENT_PROFILE": "xdg-default",
+				"XDG_CONFIG_HOME":       xdgConfigHome,
+				"CONTROL_PLANE_API_KEY": adapterTestAPIKey,
+			},
+		},
+		{
+			name: "named profile selector through HOME default directory",
+			env: map[string]string{
+				"TUNNEL_CLIENT_PROFILE": "home-default",
+				"HOME":                  homeDir,
+				"CONTROL_PLANE_API_KEY": adapterTestAPIKey,
+			},
+		},
+		{
+			name: "named profile selector expands tilde profile directory",
+			env: map[string]string{
+				"TUNNEL_CLIENT_PROFILE":     "tilde-dir",
+				"TUNNEL_CLIENT_PROFILE_DIR": "~/profiles",
+				"HOME":                      homeDir,
+				"CONTROL_PLANE_API_KEY":     adapterTestAPIKey,
+			},
+		},
+		{
+			name: "profile file selector",
+			env: map[string]string{
+				"TUNNEL_CLIENT_PROFILE_FILE": profilePath,
+				"CONTROL_PLANE_API_KEY":      adapterTestAPIKey,
+			},
+		},
+		{
+			name: "profile file selector expands tilde",
+			env: map[string]string{
+				"TUNNEL_CLIENT_PROFILE_FILE": "~/profiles/tilde-file.yaml",
+				"HOME":                       homeDir,
+				"CONTROL_PLANE_API_KEY":      adapterTestAPIKey,
+			},
+		},
+	}
+
+	covered := make(map[string]struct{})
+	for _, tc := range cases {
+		tc := tc
+		for name := range tc.env {
+			if adapterSharedEnvironmentName(name) {
+				covered[name] = struct{}{}
+			}
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			for _, flavor := range adapterRuntimeFlavors() {
+				flavor := flavor
+				t.Run(string(flavor), func(t *testing.T) {
+					full, runtime := loadParityPairForFlavor(t, nil, lookupEnvMap(tc.env), flavor)
+					assertSharedRuntimeParity(t, full, runtime)
+				})
+			}
+		})
+	}
+	if got, want := sortedFieldDifference(adapterSharedEnvironmentNames(), covered), []string{}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("shared environment parity cases do not cover %v", got)
+	}
+}
+
+func TestFullAndRuntimeStandardProxyEnvironmentDetectionParity(t *testing.T) {
+	type proxyEnvCase struct {
+		name string
+		env  map[string]string
+		want bool
+	}
+	testCases := make([]proxyEnvCase, 0, len(adapterStandardProxyEnvironmentVariables)+2)
+	for _, name := range adapterStandardProxyEnvironmentVariables {
+		testCases = append(testCases, proxyEnvCase{
+			name: name,
+			env:  map[string]string{name: "configured"},
+			want: true,
+		})
+	}
+	testCases = append(testCases,
+		proxyEnvCase{
+			name: "empty standard proxy values",
+			env:  map[string]string{"HTTP_PROXY": "", "no_proxy": ""},
+			want: false,
+		},
+		proxyEnvCase{
+			name: "unrelated environment",
+			env:  map[string]string{"ALL_PROXY": "configured"},
+			want: false,
+		},
+	)
+
+	covered := make(map[string]struct{}, len(adapterStandardProxyEnvironmentVariables))
+	for _, testCase := range testCases {
+		testCase := testCase
+		for name := range testCase.env {
+			if adapterStandardProxyEnvironmentName(name) {
+				covered[name] = struct{}{}
+			}
+		}
+		t.Run(testCase.name, func(t *testing.T) {
+			lookup := lookupEnvMap(testCase.env)
+			full := EnvProxyConfigured(lookup)
+			runtime := runtimeconfig.EnvProxyConfigured(lookup)
+			if full != runtime {
+				t.Fatalf("proxy environment detection differs: full=%t runtime=%t", full, runtime)
+			}
+			if full != testCase.want {
+				t.Fatalf("proxy environment detection = %t, want %t", full, testCase.want)
+			}
+		})
+	}
+	if got, want := sortedFieldDifference(adapterStandardProxyEnvironmentNames(), covered), []string{}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("standard proxy environment parity cases do not cover %v", got)
+	}
+}
+
+func FuzzFullAndRuntimeSharedProfileParity(f *testing.F) {
+	f.Add("https://api.example.invalid", "https://mcp.example.invalid/mcp", "struct-text", "127.0.0.1:8080", uint8(0))
+	f.Add("https://api.example.invalid/gateway", "https://mcp.example.invalid/mcp", "json", "127.0.0.1:0", uint8(1))
+	f.Fuzz(func(t *testing.T, baseURL string, mcpURL string, logFormat string, healthAddr string, flavorIndex uint8) {
+		if len(baseURL) > 256 || len(mcpURL) > 256 || len(logFormat) > 64 || len(healthAddr) > 128 {
+			t.Skip()
+		}
+		raw := []byte(fmt.Sprintf("config_version: 1\ncontrol_plane:\n  tunnel_id: tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n  api_key: env:CONTROL_PLANE_API_KEY\n  base_url: %q\nmcp:\n  server_urls:\n    - url: %q\nlog:\n  format: %q\nhealth:\n  listen_addr: %q\n", baseURL, mcpURL, logFormat, healthAddr))
+		profile := writeAdapterConfigBytes(t, raw)
+		flavors := adapterRuntimeFlavors()
+		flavor := flavors[int(flavorIndex)%len(flavors)]
+		lookup := lookupEnvMap(map[string]string{"CONTROL_PLANE_API_KEY": adapterTestAPIKey})
+
+		full, fullErr := Load([]string{"--config", profile}, lookup)
+		runtime, runtimeErr := runtimeconfig.Load([]string{"--config", profile}, flavor, lookup)
+		if (fullErr == nil) != (runtimeErr == nil) {
+			t.Fatalf("shared profile acceptance differs for %s:\nfull: %v\nruntime: %v\nprofile: %q", flavor, fullErr, runtimeErr, raw)
+		}
+		if fullErr != nil {
+			if strings.Contains(fullErr.Error(), adapterTestAPIKey) || strings.Contains(runtimeErr.Error(), adapterTestAPIKey) {
+				t.Fatalf("configuration error leaked API key: full=%v runtime=%v", fullErr, runtimeErr)
+			}
+			return
+		}
 		assertSharedRuntimeParity(t, full, runtime)
-		if full.TLS == nil || full.TLS.Path != relativeCertPath {
-			t.Fatalf("full TLS path = %#v, want %q", full.TLS, relativeCertPath)
-		}
-		if full.Health.URLFile != "relative/health.url" || full.Process.PIDFile != "relative/client.pid" {
-			t.Fatalf("relative mounted paths changed: health=%q pid=%q", full.Health.URLFile, full.Process.PIDFile)
-		}
 	})
 }
 
@@ -426,15 +975,13 @@ proxy:
 `)
 			args := []string{"--config", profile}
 			lookup := lookupEnvMap(map[string]string{"CONTROL_PLANE_API_KEY": adapterTestAPIKey})
-			full, err := Load(args, lookup)
-			if err != nil {
-				t.Fatalf("full Load returned error: %v", err)
+			for _, flavor := range adapterRuntimeFlavors() {
+				flavor := flavor
+				t.Run(string(flavor), func(t *testing.T) {
+					full, runtime := loadParityPairForFlavor(t, args, lookup, flavor)
+					assertSharedRuntimeParity(t, full, runtime)
+				})
 			}
-			runtime, err := runtimeconfig.Load(args, runtimeconfig.FlavorRuntime, lookup)
-			if err != nil {
-				t.Fatalf("runtime rejected disabled full-only profile values: %v", err)
-			}
-			assertSharedRuntimeParity(t, full, runtime)
 		})
 	}
 }
@@ -543,15 +1090,63 @@ cloudflared:
 	}
 }
 
-func loadParityPair(t *testing.T, args []string, lookup func(string) (string, bool)) (*Config, *runtimeconfig.Config) {
+func adapterRuntimeFlavors() []runtimeconfig.Flavor {
+	return []runtimeconfig.Flavor{runtimeconfig.FlavorRuntime, runtimeconfig.FlavorRuntimeCloudflared}
+}
+
+func adapterSharedEnvironmentNames() map[string]struct{} {
+	names := make(map[string]struct{}, len(adapterSharedEnvironmentVariables))
+	for _, name := range adapterSharedEnvironmentVariables {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+func adapterSharedEnvironmentName(name string) bool {
+	_, ok := adapterSharedEnvironmentNames()[name]
+	return ok
+}
+
+func adapterStandardProxyEnvironmentNames() map[string]struct{} {
+	names := make(map[string]struct{}, len(adapterStandardProxyEnvironmentVariables))
+	for _, name := range adapterStandardProxyEnvironmentVariables {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+func adapterStandardProxyEnvironmentName(name string) bool {
+	_, ok := adapterStandardProxyEnvironmentNames()[name]
+	return ok
+}
+
+func loadParityPairForFlavor(t *testing.T, args []string, lookup func(string) (string, bool), flavor runtimeconfig.Flavor) (*Config, *runtimeconfig.Config) {
 	t.Helper()
 	full, err := Load(args, lookup)
 	if err != nil {
 		t.Fatalf("full Load returned error: %v", err)
 	}
-	runtime, err := runtimeconfig.Load(args, runtimeconfig.FlavorRuntime, lookup)
+	runtime, err := runtimeconfig.Load(args, flavor, lookup)
 	if err != nil {
-		t.Fatalf("runtime Load returned error: %v", err)
+		t.Fatalf("%s Load returned error: %v", flavor, err)
+	}
+	return full, runtime
+}
+
+func loadRuntimeCloudflaredParityPair(t *testing.T, args []string, lookup func(string) (string, bool)) (*Config, *runtimeconfig.CloudflaredConfig) {
+	t.Helper()
+	full, err := Load(args, lookup)
+	if err != nil {
+		t.Fatalf("full Load returned error: %v", err)
+	}
+	fs := pflag.NewFlagSet("runtime-cloudflared", pflag.ContinueOnError)
+	runtimeconfig.RegisterFlags(fs, runtimeconfig.FlavorRuntimeCloudflared)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("runtime-cloudflared flag parse returned error: %v", err)
+	}
+	runtime, err := runtimeconfig.LoadCloudflaredFromFlagSet(fs, lookup)
+	if err != nil {
+		t.Fatalf("runtime-cloudflared Load returned error: %v", err)
 	}
 	return full, runtime
 }
@@ -669,8 +1264,20 @@ func writeAdapterClientCertificate(t *testing.T) (string, string) {
 
 func writeAdapterConfig(t *testing.T, contents string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(strings.TrimSpace(contents)+"\n"), 0o600); err != nil {
+	return writeAdapterConfigBytes(t, []byte(strings.TrimSpace(contents)+"\n"))
+}
+
+func writeAdapterConfigBytes(t *testing.T, contents []byte) string {
+	t.Helper()
+	return writeAdapterProfileFile(t, filepath.Join(t.TempDir(), "config.yaml"), contents)
+}
+
+func writeAdapterProfileFile(t *testing.T, path string, contents []byte) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	return path

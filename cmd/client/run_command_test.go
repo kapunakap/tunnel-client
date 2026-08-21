@@ -5,8 +5,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sort"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 
 	"github.com/openai/tunnel-client/pkg/config"
@@ -36,6 +38,24 @@ func TestRunHelpIsScoped(t *testing.T) {
 	require.Contains(t, output, "control-plane.base-url")
 	require.Contains(t, output, "embedded-mcp-stub")
 	require.NotContains(t, output, "Commands:")
+}
+
+func TestRunCommandAddsOnlyEmbeddedStubFlagsToFullConfigSurface(t *testing.T) {
+	t.Parallel()
+
+	run := newRunCommand(func(string) (string, bool) { return "", false })
+	fullConfigFlags := pflag.NewFlagSet("full-config", pflag.ContinueOnError)
+	config.RegisterFlags(fullConfigFlags)
+
+	got := runCommandFlagNames(run.Flags())
+	want := append(runCommandFlagNames(fullConfigFlags),
+		"embedded-mcp-listen-addr",
+		"embedded-mcp-server-name",
+		"embedded-mcp-server-version",
+		"embedded-mcp-stub",
+	)
+	sort.Strings(want)
+	require.Equal(t, want, got)
 }
 
 func TestRunReportsTunnelIDBeforeMissingMCPBinding(t *testing.T) {
@@ -137,4 +157,13 @@ func TestRunEmbeddedMCPStubRejectsExplicitMainMCPFlags(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "--embedded-mcp-stub cannot be combined with --mcp.command")
+}
+
+func runCommandFlagNames(fs *pflag.FlagSet) []string {
+	names := make([]string, 0)
+	fs.VisitAll(func(flag *pflag.Flag) {
+		names = append(names, flag.Name)
+	})
+	sort.Strings(names)
+	return names
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -45,6 +46,39 @@ func TestRegisterFlagsCloudflaredAddsApprovedCompanionFlags(t *testing.T) {
 			t.Fatalf("runtime-cloudflared flag set unexpectedly registers %q", name)
 		}
 	}
+}
+
+func TestRuntimeSettingAllowlistsStayExplicitAndCurrent(t *testing.T) {
+	assertExactRuntimeSettingList(t, "full-only flags", fullOnlyFlags, []string{
+		"admin-ui.log-buffer-events",
+		"allow-remote-ui",
+		"harpoon.capture-payloads",
+		"open-web-ui",
+		"proxy.check-interval",
+	})
+	fullOnlyEnvironmentNames := make([]string, 0, len(fullOnlyEnv))
+	for _, setting := range fullOnlyEnv {
+		fullOnlyEnvironmentNames = append(fullOnlyEnvironmentNames, setting.name)
+	}
+	assertExactRuntimeSettingList(t, "full-only environment", fullOnlyEnvironmentNames, []string{
+		"ADMIN_UI_LOG_BUFFER_EVENTS",
+		"ALLOW_REMOTE_UI",
+		"HARPOON_CAPTURE_PAYLOADS",
+		"OPEN_WEB_UI",
+		"PROXY_CHECK_INTERVAL",
+	})
+	assertExactRuntimeSettingList(t, "cloudflared flags", cloudflaredFlags, []string{
+		"cloudflared.managed",
+		"cloudflared.path",
+		"cloudflared.ready-timeout",
+		"cloudflared.token",
+	})
+	assertExactRuntimeSettingList(t, "cloudflared environment", cloudflaredEnv, []string{
+		"CLOUDFLARED_MANAGED",
+		"CLOUDFLARED_PATH",
+		"CLOUDFLARED_READY_TIMEOUT",
+		"CLOUDFLARED_TUNNEL_TOKEN",
+	})
 }
 
 func TestLoadFromFlagSetPreservesFlagsEnvYAMLDefaultsPrecedence(t *testing.T) {
@@ -317,4 +351,15 @@ func writeRuntimeConfig(t *testing.T, contents string) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+func assertExactRuntimeSettingList(t *testing.T, label string, got []string, want []string) {
+	t.Helper()
+	got = append([]string(nil), got...)
+	want = append([]string(nil), want...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s = %v, want exactly %v", label, got, want)
+	}
 }

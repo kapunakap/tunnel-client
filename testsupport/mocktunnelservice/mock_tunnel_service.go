@@ -235,6 +235,8 @@ type MockTunnelService struct {
 	storage             *sharedStorage
 	autoSessionMutators bool
 	allowPending        bool
+	pollStatus          int
+	pollFailures        int
 
 	tb atomic.Value // testing.TB
 }
@@ -506,6 +508,52 @@ func (m *MockTunnelService) AllowPending() {
 	m.allowPending = true
 }
 
+// SetPollStatus makes subsequent poll requests fail with status until reset to
+// zero. Tests use this to inject a deterministic, recoverable control-plane
+// outage without racing server restart or listener replacement.
+func (m *MockTunnelService) SetPollStatus(status int) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pollStatus = status
+	m.signalStateChangeLocked()
+}
+
+// PollFailures returns the number of poll requests served with an injected
+// failure status.
+func (m *MockTunnelService) PollFailures() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pollFailures
+}
+
+// WaitForPollFailures blocks until at least n poll requests have been served
+// with an injected failure status, or until ctx expires.
+func (m *MockTunnelService) WaitForPollFailures(ctx context.Context, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	for {
+		m.mu.Lock()
+		count := m.pollFailures
+		state := m.stateCh
+		m.mu.Unlock()
+		if count >= n {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-state:
+		}
+	}
+}
+
 // BaseURL returns the base URL the client should target.
 func (m *MockTunnelService) BaseURL() *url.URL {
 	m.mu.Lock()
@@ -720,6 +768,17 @@ func (m *MockTunnelService) handlePoll(w http.ResponseWriter, r *http.Request) {
 	m.assertAuthHeaders(r)
 	if got := m.extractTunnelID(r.URL.Path, "/poll"); got != m.tunnelID {
 		m.failf("unexpected tunnel_id %q in poll path", got)
+	}
+	m.mu.Lock()
+	pollStatus := m.pollStatus
+	if pollStatus != 0 {
+		m.pollFailures++
+		m.signalStateChangeLocked()
+	}
+	m.mu.Unlock()
+	if pollStatus != 0 {
+		http.Error(w, http.StatusText(pollStatus), pollStatus)
+		return
 	}
 	waitLimit := m.pollWaitLimit
 	if waitLimit <= 0 {

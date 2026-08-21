@@ -297,13 +297,27 @@ func TestRuntimeCloudflared(t *testing.T) {
 func newRuntimeArtifactMocks(t *testing.T) (*mocktunnelservice.MockTunnelService, *mockmcpserver.MockMCPServer) {
 	t.Helper()
 
-	mcpServer := mockmcpserver.NewMockMCPServer(
+	return newRuntimeArtifactMocksWithMCPOptions(t)
+}
+
+// newRuntimeArtifactMocksWithMCPOptions keeps the standard host-binary fixture
+// script canonical while allowing compatibility scenarios to vary only the MCP
+// transport surface under test (for example TLS or required headers).
+func newRuntimeArtifactMocksWithMCPOptions(
+	t *testing.T,
+	extraMCPOptions ...mockmcpserver.Option,
+) (*mocktunnelservice.MockTunnelService, *mockmcpserver.MockMCPServer) {
+	t.Helper()
+
+	mcpOptions := []mockmcpserver.Option{
 		mockmcpserver.WithOAuthDiscoveryResources(),
 		mockmcpserver.WithCalls(mockmcpserver.Call{
 			Tool:   "echo",
 			Result: json.RawMessage("{\"ok\":true}"),
 		}),
-	)
+	}
+	mcpOptions = append(mcpOptions, extraMCPOptions...)
+	mcpServer := mockmcpserver.NewMockMCPServer(mcpOptions...)
 	mcpServer.Start(t)
 
 	toolCommand := mocktunnelservice.CommandResponse{
@@ -642,12 +656,23 @@ func runtimeArtifactEnvironment(overrides map[string]string) []string {
 		"LOG_LEVEL":                        {},
 		"OPEN_WEB_UI":                      {},
 		"OPENAI_API_KEY":                   {},
+		"ALL_PROXY":                        {},
+		"all_proxy":                        {},
+		"HTTP_PROXY":                       {},
+		"http_proxy":                       {},
+		"HTTPS_PROXY":                      {},
+		"https_proxy":                      {},
+		"NO_PROXY":                         {},
+		"no_proxy":                         {},
 		"PROXY_CHECK_INTERVAL":             {},
 		"RUNTIME_COMPAT_CONTROL_PLANE_URL": {},
 		"RUNTIME_COMPAT_MCP_URL":           {},
 		"TUNNEL_CLIENT_CONFIG":             {},
 		"TUNNEL_CLIENT_PROFILE":            {},
 		"TUNNEL_CLIENT_PROFILE_FILE":       {},
+	}
+	for key := range overrides {
+		blocked[key] = struct{}{}
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides)+3)
 	for _, entry := range os.Environ() {
@@ -660,11 +685,15 @@ func runtimeArtifactEnvironment(overrides map[string]string) []string {
 		}
 		env = append(env, entry)
 	}
-	env = append(env,
-		"CONTROL_PLANE_API_KEY="+runtimeArtifactAPIKey,
-		"NO_PROXY=127.0.0.1,localhost",
-		"no_proxy=127.0.0.1,localhost",
-	)
+	if _, ok := overrides["CONTROL_PLANE_API_KEY"]; !ok {
+		env = append(env, "CONTROL_PLANE_API_KEY="+runtimeArtifactAPIKey)
+	}
+	if _, ok := overrides["NO_PROXY"]; !ok {
+		env = append(env, "NO_PROXY=127.0.0.1,localhost")
+	}
+	if _, ok := overrides["no_proxy"]; !ok {
+		env = append(env, "no_proxy=127.0.0.1,localhost")
+	}
 	for key, value := range overrides {
 		env = append(env, key+"="+value)
 	}
@@ -898,18 +927,23 @@ func TestRuntimeCloudflaredHelperProcess(t *testing.T) {
 		_, _ = w.Write([]byte("ready"))
 	})
 	server := &http.Server{Handler: mux}
-	go func() { _ = server.Serve(listener) }()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	defer signal.Stop(signals)
 
+	// Publish the startup marker only after the interrupt handler is armed,
+	// and do it before /ready can be observed. Under -race the old order left
+	// a window where the parent saw readiness and interrupted the helper before
+	// it could write the shutdown marker.
 	if startedFile := os.Getenv("RUNTIME_CLOUDFLARED_STARTED_FILE"); startedFile != "" {
 		if err := os.WriteFile(startedFile, []byte("started\n"), 0o600); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err.Error())
 			os.Exit(2)
 		}
 	}
+	go func() { _ = server.Serve(listener) }()
 
 	exitFile := os.Getenv("RUNTIME_CLOUDFLARED_EXIT_FILE")
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt)
 	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
 	for {
@@ -921,6 +955,12 @@ func TestRuntimeCloudflaredHelperProcess(t *testing.T) {
 		}
 		select {
 		case <-signals:
+			if signalFile := os.Getenv("RUNTIME_CLOUDFLARED_SIGNAL_FILE"); signalFile != "" {
+				if err := os.WriteFile(signalFile, []byte("signal\n"), 0o600); err != nil {
+					_, _ = fmt.Fprintln(os.Stderr, err.Error())
+					os.Exit(2)
+				}
+			}
 			_ = server.Close()
 			os.Exit(0)
 		case <-deadline.C:

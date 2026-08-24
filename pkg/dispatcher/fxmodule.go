@@ -51,14 +51,15 @@ func newPolledCommandQueue(p Params) Result {
 }
 
 type dispatcherChannelBinding struct {
-	Channel                    types.Channel
-	Priority                   int
-	TransportKind              runtimeconfig.MCPTransportKind
-	Transport                  mcp.Transport
-	Routable                   func() bool
-	SupportsMCP                bool
-	SupportsOAuth              bool
-	SupportsSessionTermination bool
+	Channel                          types.Channel
+	Priority                         int
+	TransportKind                    runtimeconfig.MCPTransportKind
+	Transport                        mcp.Transport
+	StdioSendInitializedNotification bool
+	Routable                         func() bool
+	SupportsMCP                      bool
+	SupportsOAuth                    bool
+	SupportsSessionTermination       bool
 }
 
 // Module registers the dispatcher components with the Fx graph. It provides the
@@ -114,13 +115,14 @@ func newConfiguredChannelBindings(cfg *runtimeconfig.MCPConfig, factory *mcpclie
 			transportKind = runtimeconfig.MCPTransportHTTPStreamable
 		}
 		bindings = append(bindings, dispatcherChannelBinding{
-			Channel:                    channelName,
-			Priority:                   0,
-			TransportKind:              transportKind,
-			Transport:                  transport,
-			SupportsMCP:                true,
-			SupportsOAuth:              channelName == types.DefaultChannel,
-			SupportsSessionTermination: transportKind == runtimeconfig.MCPTransportHTTPStreamable,
+			Channel:                          channelName,
+			Priority:                         0,
+			TransportKind:                    transportKind,
+			Transport:                        transport,
+			StdioSendInitializedNotification: cfg.StdioSendInitializedNotification,
+			SupportsMCP:                      true,
+			SupportsOAuth:                    channelName == types.DefaultChannel,
+			SupportsSessionTermination:       transportKind == runtimeconfig.MCPTransportHTTPStreamable,
 		})
 	}
 	return configuredChannelBindingsResult{Bindings: bindings}, nil
@@ -189,10 +191,16 @@ func newProcessorChannelBindings(p processorChannelBindingsParams) (map[types.Ch
 			// Stdio and Harpoon reuse a single underlying connection. Keep one
 			// request lifecycle active at a time so concurrent workers cannot
 			// consume another request's JSON-RPC response. Stdio also keeps its
-			// child-process pipes alive when one request deadline expires and
-			// filters that request's late response before the next lifecycle.
+			// child-process pipes alive when one request deadline expires and filters
+			// that request's late response before the next lifecycle. Completing MCP
+			// initialization for callers that omit notifications/initialized is an
+			// explicit operator opt-in so legacy stdio servers keep verbatim behavior.
 			if binding.TransportKind == runtimeconfig.MCPTransportStdio {
-				transport = mcpclient.NewSerializedForwardingTransportWithDeadlineRetirement(transport)
+				if binding.StdioSendInitializedNotification {
+					transport = mcpclient.NewStdioForwardingTransport(transport)
+				} else {
+					transport = mcpclient.NewSerializedForwardingTransportWithDeadlineRetirement(transport)
+				}
 			} else if canonical == types.ChannelHarpoon {
 				transport = mcpclient.NewSerializedForwardingTransport(transport)
 			}

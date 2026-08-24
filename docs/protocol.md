@@ -287,6 +287,17 @@ notifications are ambiguous and may be dropped, but later terminal responses
 continue by ID. An `initialize` deadline remains fail-closed because
 initialization cannot be safely cancelled or replayed.
 
+Shared stdio also has one opt-in lifecycle compatibility guard. When
+`--mcp.stdio-send-initialized-notification` (or
+`MCP_STDIO_SEND_INITIALIZED_NOTIFICATION`) is enabled, a successful ID-bearing
+`initialize` response makes tunnel-client write `notifications/initialized` to
+the local stdio server before admitting the next command. If the caller later
+supplies that same no-ID notification, the client acknowledges the polled
+command without writing a duplicate downstream. The guard is disabled by
+default so legacy stdio servers keep verbatim JSON-RPC forwarding; operators
+can enable it for specification-compliant servers paired with older callers
+that omit the notification.
+
 ### `jsonrpc` commands
 
 For `command_type: "jsonrpc"`, `jsonrpc` is the raw JSON-RPC request or

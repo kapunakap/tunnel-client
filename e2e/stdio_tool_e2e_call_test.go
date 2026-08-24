@@ -23,6 +23,104 @@ func TestHarnessExecuteScenarioWithStdioCommand(t *testing.T) {
 	runSimpleToolScenarioWithCommand(t, commandArgs)
 }
 
+func TestHarnessStdioOptInInitializesBeforeToolCallWhenControlPlaneOmitsNotification(t *testing.T) {
+	t.Setenv("MOCK_MCP_REQUIRE_INITIALIZED", "1")
+	runStdioInitializeThenToolScenario(t, true, "initialize\nnotifications/initialized\ntools/call\n")
+}
+
+func TestHarnessStdioLegacyDefaultDoesNotInjectInitializedNotification(t *testing.T) {
+	t.Setenv("MOCK_MCP_REJECT_INITIALIZED", "1")
+	runStdioInitializeThenToolScenario(t, false, "initialize\ntools/call\n")
+}
+
+func runStdioInitializeThenToolScenario(t *testing.T, sendInitializedNotification bool, wantMessages string) {
+	t.Helper()
+
+	const (
+		initializeRequestID = "cmd-initialize"
+		initializeCallID    = "initialize-1"
+		toolRequestID       = "cmd-tool"
+		toolCallID          = "tool-1"
+	)
+
+	messageLog := t.TempDir() + "/stdio-messages.log"
+	t.Setenv("MOCK_MCP_MESSAGE_LOG", messageLog)
+
+	initializeCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			initializeRequestID,
+			json.RawMessage(`{
+				"jsonrpc":"2.0",
+				"id":"`+initializeCallID+`",
+				"method":"initialize",
+				"params":{
+					"protocolVersion":"2025-11-25",
+					"capabilities":{},
+					"clientInfo":{"name":"openai-mcp (Codex)","version":"1.0.0"}
+				}
+			}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: initializeRequestID,
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) {
+					tb.Fatalf("initialize response type mismatch: got %q", resp.ResponseType)
+				}
+				if resp.ResponseCode != http.StatusOK {
+					tb.Fatalf("initialize response code mismatch: got %d", resp.ResponseCode)
+				}
+			},
+		}},
+	}
+	toolCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			toolRequestID,
+			json.RawMessage(`{
+				"jsonrpc":"2.0",
+				"id":"`+toolCallID+`",
+				"method":"tools/call",
+				"params":{"name":"echo","arguments":{"name":"Ada"}}
+			}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: toolRequestID,
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) {
+					tb.Fatalf("tool response type mismatch: got %q", resp.ResponseType)
+				}
+				if resp.ResponseCode != http.StatusOK {
+					tb.Fatalf("tool response code mismatch: got %d", resp.ResponseCode)
+				}
+			},
+		}},
+	}
+
+	options := []harnesspkg.HarnessOption{
+		harnesspkg.WithMCPCommand(mockmcpserver.StdioServerCommand(t)),
+		harnesspkg.WithScenarioTimeout(3 * time.Second),
+		harnesspkg.WithControlPlaneOptions(
+			mocktunnelservice.WithCommandResponses(initializeCommand, toolCommand),
+		),
+	}
+	if sendInitializedNotification {
+		options = append(options, harnesspkg.WithClientConfig(func(cfg *config.Config) {
+			cfg.MCP.StdioSendInitializedNotification = true
+		}))
+	}
+	h := harnesspkg.NewHarness(t, options...)
+	h.ExecuteScenarious(t)
+
+	messages, err := os.ReadFile(messageLog)
+	if err != nil {
+		t.Fatalf("read stdio message log: %v", err)
+	}
+	if got := string(messages); got != wantMessages {
+		t.Fatalf("unexpected stdio lifecycle sequence: got %q want %q", got, wantMessages)
+	}
+}
+
 func TestHarnessStdioResponseDeadlineKeepsServingAfterTimedOutRequest(t *testing.T) {
 	const (
 		timedOutRequestID = "cmd-timeout"

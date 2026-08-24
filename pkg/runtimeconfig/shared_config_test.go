@@ -424,6 +424,7 @@ mcp:
   discovery_extra_headers:
     X-Discovery-Auth: file:`+discoveryHeaderPath+`
   startup_wait_timeout: 75s
+  stdio_send_initialized_notification: true
   connection_max_ttl: 2m
   max_concurrent_requests: 9
 harpoon:
@@ -496,8 +497,8 @@ harpoon:
 	if cfg.MCP.ServerURL == nil || cfg.MCP.ServerURL.String() != "https://yaml-mcp.example/mcp" {
 		t.Fatalf("unexpected main MCP server URL: %v", cfg.MCP.ServerURL)
 	}
-	if cfg.MCP.StartupWaitTimeout != 75*time.Second || cfg.MCP.ConnectionMaxTTL != 2*time.Minute || cfg.MCP.MaxConcurrentRequests != 9 {
-		t.Fatalf("unexpected MCP limits: startup_wait=%s ttl=%s max=%d", cfg.MCP.StartupWaitTimeout, cfg.MCP.ConnectionMaxTTL, cfg.MCP.MaxConcurrentRequests)
+	if cfg.MCP.StartupWaitTimeout != 75*time.Second || !cfg.MCP.StdioSendInitializedNotification || cfg.MCP.ConnectionMaxTTL != 2*time.Minute || cfg.MCP.MaxConcurrentRequests != 9 {
+		t.Fatalf("unexpected MCP settings: startup_wait=%s stdio_initialized=%t ttl=%s max=%d", cfg.MCP.StartupWaitTimeout, cfg.MCP.StdioSendInitializedNotification, cfg.MCP.ConnectionMaxTTL, cfg.MCP.MaxConcurrentRequests)
 	}
 	if cfg.MCP.ExtraHeaders["X-Internal-Auth"] != "yaml-static-from-env" {
 		t.Fatalf("unexpected MCP extra headers: %#v", cfg.MCP.ExtraHeaders)
@@ -1302,6 +1303,62 @@ func TestLoadMCPStartupWaitTimeout(t *testing.T) {
 			}
 			if cfg.MCP.StartupWaitTimeout != testCase.want {
 				t.Fatalf("startup wait timeout = %s, want %s", cfg.MCP.StartupWaitTimeout, testCase.want)
+			}
+		})
+	}
+}
+
+func TestLoadMCPStdioSendInitializedNotification(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want bool
+	}{
+		{
+			name: "disabled by default",
+			want: false,
+		},
+		{
+			name: "environment opt in",
+			env:  map[string]string{"MCP_STDIO_SEND_INITIALIZED_NOTIFICATION": "true"},
+			want: true,
+		},
+		{
+			name: "flag overrides environment",
+			args: []string{"--mcp.stdio-send-initialized-notification=false"},
+			env:  map[string]string{"MCP_STDIO_SEND_INITIALIZED_NOTIFICATION": "true"},
+			want: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string{
+				"--control-plane.tunnel-id", flagTunnelID,
+				"--mcp.command", "echo hello",
+			}, testCase.args...)
+			cfg, err := LoadRuntimeForTest(args, func(key string) (string, bool) {
+				if value, ok := testCase.env[key]; ok {
+					return value, true
+				}
+				if key == "CONTROL_PLANE_API_KEY" {
+					return "key", true
+				}
+				if key == "LOG_FORMAT" {
+					return "struct-text", true
+				}
+				return "", false
+			})
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+			if cfg.MCP.StdioSendInitializedNotification != testCase.want {
+				t.Fatalf("stdio initialized notification = %t, want %t", cfg.MCP.StdioSendInitializedNotification, testCase.want)
 			}
 		})
 	}

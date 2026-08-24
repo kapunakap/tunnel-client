@@ -442,6 +442,16 @@ routing, streaming, OAuth discovery, and common setup pitfalls, see
   - Note: stdio transport does not support MCP sessions
   - Note: when using `MCP_COMMAND` with multiple entries, separate entries with
     newlines so semicolons remain part of the command.
+- **Stdio initialized notification shim (optional)**
+  - Flag: `--mcp.stdio-send-initialized-notification`
+  - Env: `MCP_STDIO_SEND_INITIALIZED_NOTIFICATION`
+  - YAML: `mcp.stdio_send_initialized_notification`
+  - Default: `false` (disabled)
+  - When enabled, tunnel-client writes `notifications/initialized` after a
+    successful forwarded stdio `initialize` response and suppresses a later
+    duplicate from the caller. Enable it only for stdio servers that implement
+    the MCP lifecycle notification and callers that can omit it; leaving it
+    disabled preserves legacy verbatim forwarding.
 - **Multiple entries**
   - Flags are repeatable; each entry can target a different channel.
   - Environment variables accept newline-delimited entries.

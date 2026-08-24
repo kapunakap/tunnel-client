@@ -19,7 +19,7 @@ import (
 // until the matching final JSON-RPC response, an error, or Close. Notifications
 // without ids release immediately after the write because no response is legal.
 func NewSerializedForwardingTransport(base ForwardingTransport) ForwardingTransport {
-	return newSerializedForwardingTransport(base, false)
+	return newSerializedForwardingTransport(base, false, false)
 }
 
 // NewSerializedForwardingTransportWithDeadlineRetirement wraps a shared
@@ -36,10 +36,22 @@ func NewSerializedForwardingTransport(base ForwardingTransport) ForwardingTransp
 // later request. Admitting the next request after retirement keeps terminal
 // responses flowing even when the timed-out server work never replies.
 func NewSerializedForwardingTransportWithDeadlineRetirement(base ForwardingTransport) ForwardingTransport {
-	return newSerializedForwardingTransport(base, true)
+	return newSerializedForwardingTransport(base, true, false)
 }
 
-func newSerializedForwardingTransport(base ForwardingTransport, retireOnDeadline bool) ForwardingTransport {
+// NewStdioForwardingTransport opts a shared stdio transport into the
+// serialization and deadline-retirement behavior it needs, plus a compatibility
+// shim for callers that omit MCP's initialized notification. After a successful
+// initialize response, the wrapper writes notifications/initialized before it
+// releases the lifecycle slot. If the caller later forwards the same
+// notification, the wrapper acknowledges it without writing a duplicate to the
+// stdio server. Callers must choose this wrapper explicitly so legacy stdio
+// servers keep verbatim forwarding by default.
+func NewStdioForwardingTransport(base ForwardingTransport) ForwardingTransport {
+	return newSerializedForwardingTransport(base, true, true)
+}
+
+func newSerializedForwardingTransport(base ForwardingTransport, retireOnDeadline, ensureInitialized bool) ForwardingTransport {
 	if base == nil {
 		return nil
 	}
@@ -47,6 +59,7 @@ func newSerializedForwardingTransport(base ForwardingTransport, retireOnDeadline
 		base:               base,
 		lifecycleSlot:      make(chan struct{}, 1),
 		retireOnDeadline:   retireOnDeadline,
+		ensureInitialized:  ensureInitialized,
 		retiredResponseIDs: make(map[jsonrpc.ID]struct{}),
 	}
 }
@@ -55,12 +68,21 @@ type serializedForwardingTransport struct {
 	base             ForwardingTransport
 	lifecycleSlot    chan struct{}
 	retireOnDeadline bool
+	// ensureInitialized is enabled only for stdio. The tunnel normally forwards
+	// the caller's lifecycle messages verbatim, but older callers can omit the
+	// required notification and leave a compliant stdio server waiting forever.
+	ensureInitialized bool
 
 	retiredMu          sync.Mutex
 	retiredResponseIDs map[jsonrpc.ID]struct{}
+
+	initializedMu           sync.Mutex
+	initializedNotification bool
 }
 
 const maxRetiredResponseIDs = 1024
+
+const initializedNotificationMethod = "notifications/initialized"
 
 func (t *serializedForwardingTransport) Connect(
 	ctx context.Context,
@@ -204,10 +226,23 @@ func (c *serializedForwardingConnection) Write(
 	if err := c.acquire(ctx, expectResponse, expectedID, method); err != nil {
 		return ForwardingWriteResult{}, err
 	}
+	if method == "initialize" && c.transport != nil {
+		c.transport.resetInitializedNotification()
+	}
+	if c.shouldSuppressInitializedNotification(msg) {
+		c.markWriteCompleted(true)
+		c.markDeadlineRetirableWithoutResponse(true)
+		c.release()
+		return ForwardingWriteResult{}, nil
+	}
 
 	result, err := c.base.Write(ctx, header, msg)
 	c.markWriteCompleted(err == nil)
-	if err != nil && c.shouldAwaitDeadlineRetirement(ctx, err) {
+	awaitDeadlineRetirement := err != nil && c.shouldAwaitDeadlineRetirement(ctx, err)
+	if c.transport != nil && !awaitDeadlineRetirement && (err != nil || result.PreservedError != nil || result.StatusCode >= http.StatusBadRequest) {
+		c.transport.resetInitializedNotification()
+	}
+	if awaitDeadlineRetirement {
 		// The processor decides whether this context error is specifically the
 		// response-deadline path. Keep the slot until it retires or closes.
 	} else if !expectResponse {
@@ -239,11 +274,86 @@ func (c *serializedForwardingConnection) Read(ctx context.Context) (jsonrpc.Mess
 		if c.transport != nil && c.transport.shouldDropRetiredMessage(msg) {
 			continue
 		}
+		if c.shouldEnsureInitializedNotification(msg) {
+			if err := c.writeInitializedNotification(ctx); err != nil {
+				c.release()
+				return nil, err
+			}
+		}
 		if c.shouldReleaseAfterRead(msg) {
 			c.release()
 		}
 		return msg, nil
 	}
+}
+
+func (c *serializedForwardingConnection) shouldSuppressInitializedNotification(msg jsonrpc.Message) bool {
+	if c == nil || c.transport == nil || !c.transport.ensureInitialized || !c.transport.initializedNotificationSent() {
+		return false
+	}
+	request, ok := msg.(*jsonrpc.Request)
+	return ok && request != nil && !request.ID.IsValid() && request.Method == initializedNotificationMethod
+}
+
+func (c *serializedForwardingConnection) shouldEnsureInitializedNotification(msg jsonrpc.Message) bool {
+	if c == nil || c.transport == nil || !c.transport.ensureInitialized {
+		return false
+	}
+	response, ok := msg.(*jsonrpc.Response)
+	if !ok || response == nil || response.Error != nil || !response.ID.IsValid() {
+		return false
+	}
+
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.lockHeld && c.awaitingResponse && c.requestMethod == "initialize" && c.expectedID.IsValid() && response.ID == c.expectedID
+}
+
+func (c *serializedForwardingConnection) writeInitializedNotification(ctx context.Context) error {
+	// The initialize response has already been read successfully. Detach the
+	// tiny lifecycle write from the tunnel command deadline so cancellation in
+	// the handoff gap cannot skip the notification and poison the shared stdio
+	// session before the response is delivered upstream.
+	writeCtx := context.WithoutCancel(ctx)
+	result, err := c.base.Write(writeCtx, nil, &jsonrpc.Request{Method: initializedNotificationMethod})
+	if err != nil {
+		return fmt.Errorf("send MCP initialized notification after initialize: %w", err)
+	}
+	if result.PreservedError != nil {
+		return fmt.Errorf("send MCP initialized notification after initialize: downstream rejected notification")
+	}
+	if result.StatusCode != 0 && (result.StatusCode < http.StatusOK || result.StatusCode >= http.StatusMultipleChoices) {
+		return fmt.Errorf("send MCP initialized notification after initialize: downstream returned status %d", result.StatusCode)
+	}
+	c.transport.markInitializedNotificationSent()
+	return nil
+}
+
+func (t *serializedForwardingTransport) initializedNotificationSent() bool {
+	if t == nil {
+		return false
+	}
+	t.initializedMu.Lock()
+	defer t.initializedMu.Unlock()
+	return t.initializedNotification
+}
+
+func (t *serializedForwardingTransport) markInitializedNotificationSent() {
+	if t == nil {
+		return
+	}
+	t.initializedMu.Lock()
+	t.initializedNotification = true
+	t.initializedMu.Unlock()
+}
+
+func (t *serializedForwardingTransport) resetInitializedNotification() {
+	if t == nil || !t.ensureInitialized {
+		return
+	}
+	t.initializedMu.Lock()
+	t.initializedNotification = false
+	t.initializedMu.Unlock()
 }
 
 func (c *serializedForwardingConnection) Close() error {
@@ -253,6 +363,9 @@ func (c *serializedForwardingConnection) Close() error {
 	}
 	if c.isRetired() {
 		return nil
+	}
+	if c.transport != nil {
+		c.transport.resetInitializedNotification()
 	}
 	defer c.release()
 	return c.base.Close()

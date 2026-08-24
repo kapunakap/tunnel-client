@@ -282,13 +282,17 @@ type MCPConfig struct {
 	AllowNoMain bool
 	// StartupWaitTimeout enables an opt-in startup gate for the main
 	// HTTP-streamable MCP listener. Zero preserves legacy behavior.
-	StartupWaitTimeout    time.Duration
-	ConnectionMaxTTL      time.Duration
-	MaxConcurrentRequests int
-	ExtraHeaders          map[string]string
-	DiscoveryExtraHeaders map[string]string
-	HTTPProxy             *url.URL
-	HTTPProxySource       ProxySource
+	StartupWaitTimeout time.Duration
+	// StdioSendInitializedNotification opts stdio bindings into completing the
+	// MCP lifecycle when an older caller omits notifications/initialized. False
+	// preserves the legacy verbatim-forwarding behavior for existing servers.
+	StdioSendInitializedNotification bool
+	ConnectionMaxTTL                 time.Duration
+	MaxConcurrentRequests            int
+	ExtraHeaders                     map[string]string
+	DiscoveryExtraHeaders            map[string]string
+	HTTPProxy                        *url.URL
+	HTTPProxySource                  ProxySource
 }
 
 // PollTimeoutOrDefault returns the configured requested service wait or its runtime default.
@@ -480,6 +484,7 @@ func RegisterFlags(fs *pflag.FlagSet, flavor Flavor) {
 	fs.String("http-proxy", "", "Global outbound HTTP proxy (applies to control-plane, MCP, and Harpoon) (format <url|env:VAR>)")
 	fs.StringArray("mcp.server-url", nil, "Target MCP server URL (repeatable; format url=...,channel=...,unix-socket=...,http-proxy=...,client-cert=...,client-key=...) (env.MCP_SERVER_URL)")
 	fs.StringArray("mcp.command", nil, "Command to launch an MCP server over stdio (repeatable; format command=...,channel=...) (env.MCP_COMMAND)")
+	fs.Bool("mcp.stdio-send-initialized-notification", false, "Opt in to sending notifications/initialized after a successful stdio initialize response (env.MCP_STDIO_SEND_INITIALIZED_NOTIFICATION)")
 	fs.String("mcp.http-proxy", "", "Outbound HTTP proxy for MCP (format <url|env:VAR>)")
 	fs.String("mcp.client-cert", "", "Path to PEM client certificate for MCP mTLS (format <path|env:VAR>) (env.MCP_CLIENT_CERT)")
 	fs.String("mcp.client-key", "", "Path to PEM client private key for MCP mTLS (format <path|env:VAR>) (env.MCP_CLIENT_KEY)")
@@ -1766,6 +1771,15 @@ func buildMCPConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, bool), gl
 	if startupWaitTimeout < 0 {
 		return MCPConfig{}, errors.New("mcp.startup-wait-timeout must not be negative")
 	}
+	stdioSendInitializedNotification, err := getBool(
+		fs,
+		lookupEnv,
+		"mcp.stdio-send-initialized-notification",
+		"MCP_STDIO_SEND_INITIALIZED_NOTIFICATION",
+	)
+	if err != nil {
+		return MCPConfig{}, err
+	}
 
 	maxConcurrent := defaultMCPMaxConcurrentRequests
 	if flag := fs.Lookup("mcp.max-concurrent-requests"); flag != nil && flag.Changed {
@@ -1850,15 +1864,16 @@ func buildMCPConfig(fs *pflag.FlagSet, lookupEnv func(string) (string, bool), gl
 	}
 
 	cfg := MCPConfig{
-		ClientCertificate:     defaultClientCertificate,
-		ChannelBindings:       bindings,
-		StartupWaitTimeout:    startupWaitTimeout,
-		ConnectionMaxTTL:      ttl,
-		MaxConcurrentRequests: maxConcurrent,
-		ExtraHeaders:          extraHeaders,
-		DiscoveryExtraHeaders: discoveryExtraHeaders,
-		HTTPProxy:             mcpProxy,
-		HTTPProxySource:       mcpProxySource,
+		ClientCertificate:                defaultClientCertificate,
+		ChannelBindings:                  bindings,
+		StartupWaitTimeout:               startupWaitTimeout,
+		StdioSendInitializedNotification: stdioSendInitializedNotification,
+		ConnectionMaxTTL:                 ttl,
+		MaxConcurrentRequests:            maxConcurrent,
+		ExtraHeaders:                     extraHeaders,
+		DiscoveryExtraHeaders:            discoveryExtraHeaders,
+		HTTPProxy:                        mcpProxy,
+		HTTPProxySource:                  mcpProxySource,
 	}
 	if mainBinding := cfg.MainChannelBinding(); mainBinding != nil {
 		cfg.ServerURL = mainBinding.ServerURL

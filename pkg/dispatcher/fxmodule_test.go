@@ -88,6 +88,66 @@ func TestNewProcessorChannelBindingsSerializesStdioTransport(t *testing.T) {
 	require.True(t, ok, "stdio binding must retire deadlines without closing its shared transport")
 }
 
+func TestNewProcessorChannelBindingsStdioInitializedNotificationRequiresOptIn(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		enabled bool
+		want    []string
+	}{
+		{
+			name:    "legacy default forwards initialize only",
+			enabled: false,
+			want:    []string{"initialize"},
+		},
+		{
+			name:    "opt in completes lifecycle",
+			enabled: true,
+			want:    []string{"initialize", "notifications/initialized"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			baseConn := &scriptedMCPConnection{}
+			bindings, err := newProcessorChannelBindings(processorChannelBindingsParams{
+				Bindings: []dispatcherChannelBinding{
+					{
+						Channel:                          types.DefaultChannel,
+						TransportKind:                    config.MCPTransportStdio,
+						Transport:                        &scriptedMCPTransport{conn: baseConn},
+						StdioSendInitializedNotification: testCase.enabled,
+						SupportsMCP:                      true,
+						SupportsOAuth:                    true,
+					},
+					{
+						Channel:       types.ChannelHarpoon,
+						TransportKind: config.MCPTransportInMemory,
+						Transport:     noopTransport{},
+						SupportsMCP:   true,
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			conn, err := bindings[types.DefaultChannel].Transport.Connect(context.Background())
+			require.NoError(t, err)
+			id, err := jsonrpc.MakeID("initialize")
+			require.NoError(t, err)
+			_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{ID: id, Method: "initialize"})
+			require.NoError(t, err)
+			baseConn.reads = append(baseConn.reads, &jsonrpc.Response{ID: id})
+			_, err = conn.Read(context.Background())
+			require.NoError(t, err)
+
+			require.Equal(t, testCase.want, baseConn.writtenMethods())
+		})
+	}
+}
+
 func TestNewProcessorChannelBindingsMissingRequired(t *testing.T) {
 	t.Parallel()
 
@@ -263,3 +323,45 @@ func (noopConnection) Read(context.Context) (jsonrpc.Message, error) { return ni
 func (noopConnection) Write(context.Context, jsonrpc.Message) error  { return nil }
 func (noopConnection) Close() error                                  { return nil }
 func (noopConnection) SessionID() string                             { return "" }
+
+type scriptedMCPTransport struct {
+	conn *scriptedMCPConnection
+}
+
+func (t *scriptedMCPTransport) Connect(context.Context) (mcp.Connection, error) {
+	return t.conn, nil
+}
+
+type scriptedMCPConnection struct {
+	reads  []jsonrpc.Message
+	writes []jsonrpc.Message
+}
+
+func (c *scriptedMCPConnection) Read(context.Context) (jsonrpc.Message, error) {
+	if len(c.reads) == 0 {
+		return nil, nil
+	}
+	msg := c.reads[0]
+	c.reads = c.reads[1:]
+	return msg, nil
+}
+
+func (c *scriptedMCPConnection) Write(_ context.Context, msg jsonrpc.Message) error {
+	c.writes = append(c.writes, msg)
+	return nil
+}
+
+func (*scriptedMCPConnection) Close() error      { return nil }
+func (*scriptedMCPConnection) SessionID() string { return "" }
+
+func (c *scriptedMCPConnection) writtenMethods() []string {
+	methods := make([]string, 0, len(c.writes))
+	for _, msg := range c.writes {
+		request, ok := msg.(*jsonrpc.Request)
+		if !ok {
+			continue
+		}
+		methods = append(methods, request.Method)
+	}
+	return methods
+}

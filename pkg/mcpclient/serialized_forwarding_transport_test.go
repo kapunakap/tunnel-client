@@ -21,6 +21,250 @@ func TestNewSerializedForwardingTransportNilBaseReturnsNil(t *testing.T) {
 
 	require.Nil(t, NewSerializedForwardingTransport(nil))
 	require.Nil(t, NewSerializedForwardingTransportWithDeadlineRetirement(nil))
+	require.Nil(t, NewStdioForwardingTransport(nil))
+}
+
+func TestStdioDeadlineRetirementWrapperPreservesLegacyNotificationForwarding(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	transport := NewSerializedForwardingTransportWithDeadlineRetirement(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	id, err := jsonrpc.MakeID("initialize")
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{ID: id, Method: "initialize"})
+	require.NoError(t, err)
+
+	response := &jsonrpc.Response{ID: id}
+	baseConn.enqueueRead(response, nil)
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	require.Same(t, response, msg)
+	require.Equal(t, []string{"initialize"}, baseConn.writtenMethods(), "legacy stdio path must not synthesize lifecycle notifications")
+	requireLifecycleLockReleased(t, serializedTransport)
+
+	notification, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = notification.Write(context.Background(), nil, &jsonrpc.Request{Method: initializedNotificationMethod})
+	require.NoError(t, err)
+	require.Equal(t, []string{"initialize", initializedNotificationMethod}, baseConn.writtenMethods(), "legacy stdio path must forward caller notifications verbatim")
+	requireLifecycleLockReleased(t, serializedTransport)
+}
+
+func TestStdioForwardingTransportInjectsInitializedBeforeReleasingLifecycle(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	transport := NewStdioForwardingTransport(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	id, err := jsonrpc.MakeID("initialize")
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{ID: id, Method: "initialize"})
+	require.NoError(t, err)
+	requireLifecycleLockHeld(t, serializedTransport)
+
+	response := &jsonrpc.Response{ID: id}
+	baseConn.enqueueRead(response, nil)
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	require.Same(t, response, msg)
+	require.Equal(t, []string{"initialize", initializedNotificationMethod}, baseConn.writtenMethods())
+	requireLifecycleLockReleased(t, serializedTransport)
+
+	duplicate, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = duplicate.Write(context.Background(), nil, &jsonrpc.Request{Method: initializedNotificationMethod})
+	require.NoError(t, err)
+	require.Equal(t, []string{"initialize", initializedNotificationMethod}, baseConn.writtenMethods(), "caller notification should be acknowledged without a duplicate stdio write")
+	requireLifecycleLockReleased(t, serializedTransport)
+}
+
+func TestStdioForwardingTransportDoesNotInjectAfterInitializeError(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	transport := NewStdioForwardingTransport(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	id, err := jsonrpc.MakeID("initialize-error")
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{ID: id, Method: "initialize"})
+	require.NoError(t, err)
+
+	response := &jsonrpc.Response{ID: id, Error: errors.New("initialize rejected")}
+	baseConn.enqueueRead(response, nil)
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	require.Same(t, response, msg)
+	require.Equal(t, []string{"initialize"}, baseConn.writtenMethods())
+	require.False(t, serializedTransport.initializedNotificationSent())
+	requireLifecycleLockReleased(t, serializedTransport)
+}
+
+func TestStdioForwardingTransportDoesNotInjectForMismatchedInitializeResponse(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	transport := NewStdioForwardingTransport(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	initializeID, err := jsonrpc.MakeID("initialize")
+	require.NoError(t, err)
+	otherID, err := jsonrpc.MakeID("other")
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{ID: initializeID, Method: "initialize"})
+	require.NoError(t, err)
+
+	response := &jsonrpc.Response{ID: otherID}
+	baseConn.enqueueRead(response, nil)
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	require.Same(t, response, msg)
+	require.Equal(t, []string{"initialize"}, baseConn.writtenMethods())
+	require.False(t, serializedTransport.initializedNotificationSent())
+	requireLifecycleLockReleased(t, serializedTransport)
+}
+
+func TestStdioForwardingTransportInjectsForEachInitializeEpoch(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	transport := NewStdioForwardingTransport(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	for _, rawID := range []string{"initialize-1", "initialize-2"} {
+		conn, err := transport.Connect(context.Background())
+		require.NoError(t, err)
+		id, err := jsonrpc.MakeID(rawID)
+		require.NoError(t, err)
+		_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{ID: id, Method: "initialize"})
+		require.NoError(t, err)
+		response := &jsonrpc.Response{ID: id}
+		baseConn.enqueueRead(response, nil)
+		msg, err := conn.Read(context.Background())
+		require.NoError(t, err)
+		require.Same(t, response, msg)
+		requireLifecycleLockReleased(t, serializedTransport)
+	}
+
+	require.Equal(t, []string{
+		"initialize",
+		initializedNotificationMethod,
+		"initialize",
+		initializedNotificationMethod,
+	}, baseConn.writtenMethods())
+	require.True(t, serializedTransport.initializedNotificationSent())
+}
+
+func TestStdioForwardingTransportSurfacesInitializedWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	baseConn.enqueueWriteResult(http.StatusOK, nil, nil)
+	baseConn.enqueueWriteResult(0, nil, errors.New("write failed"))
+	transport := NewStdioForwardingTransport(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	id, err := jsonrpc.MakeID("initialize")
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{ID: id, Method: "initialize"})
+	require.NoError(t, err)
+
+	baseConn.enqueueRead(&jsonrpc.Response{ID: id}, nil)
+	msg, err := conn.Read(context.Background())
+	require.Nil(t, msg)
+	require.ErrorContains(t, err, "send MCP initialized notification after initialize")
+	require.ErrorContains(t, err, "write failed")
+	require.Equal(t, []string{"initialize", initializedNotificationMethod}, baseConn.writtenMethods())
+	require.False(t, serializedTransport.initializedNotificationSent())
+	requireLifecycleLockReleased(t, serializedTransport)
+}
+
+func TestStdioForwardingTransportCompletesInitializationAfterReadContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	ctx, cancel := context.WithCancel(context.Background())
+	baseConn.afterRead = cancel
+	transport := NewStdioForwardingTransport(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	id, err := jsonrpc.MakeID("initialize")
+	require.NoError(t, err)
+	_, err = conn.Write(ctx, nil, &jsonrpc.Request{ID: id, Method: "initialize"})
+	require.NoError(t, err)
+
+	response := &jsonrpc.Response{ID: id}
+	baseConn.enqueueRead(response, nil)
+	msg, err := conn.Read(ctx)
+	require.NoError(t, err)
+	require.Same(t, response, msg)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.Equal(t, []string{"initialize", initializedNotificationMethod}, baseConn.writtenMethods())
+	require.True(t, serializedTransport.initializedNotificationSent())
+	requireLifecycleLockReleased(t, serializedTransport)
+	require.Zero(t, baseConn.closeCalls.Load())
+}
+
+func TestStdioForwardingTransportKeepsInitializedStateAfterRetiredWriteDeadline(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	transport := NewStdioForwardingTransport(&stubSerializedForwardingTransport{conn: baseConn})
+	serializedTransport := transport.(*serializedForwardingTransport)
+
+	initializeConn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	initializeID, err := jsonrpc.MakeID("initialize")
+	require.NoError(t, err)
+	_, err = initializeConn.Write(context.Background(), nil, &jsonrpc.Request{ID: initializeID, Method: "initialize"})
+	require.NoError(t, err)
+	baseConn.enqueueRead(&jsonrpc.Response{ID: initializeID}, nil)
+	_, err = initializeConn.Read(context.Background())
+	require.NoError(t, err)
+	require.True(t, serializedTransport.initializedNotificationSent())
+
+	toolConn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	toolID, err := jsonrpc.MakeID("timed-out-tool")
+	require.NoError(t, err)
+	baseConn.enqueueWriteResult(0, nil, context.Canceled)
+	deadlineCtx := ContextWithResponseDeadlineEnforcement(context.Background())
+	_, err = toolConn.Write(deadlineCtx, nil, &jsonrpc.Request{ID: toolID, Method: "tools/call"})
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, serializedTransport.initializedNotificationSent(), "a logical deadline must not reset the live stdio session")
+
+	retiring, ok := toolConn.(ResponseDeadlineRetiringConnection)
+	require.True(t, ok)
+	require.True(t, retiring.RetireResponseDeadline())
+	require.NoError(t, toolConn.Close())
+	require.Zero(t, baseConn.closeCalls.Load(), "retired logical connection must not close shared stdio")
+
+	duplicate, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = duplicate.Write(context.Background(), nil, &jsonrpc.Request{Method: initializedNotificationMethod})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"initialize",
+		initializedNotificationMethod,
+		"tools/call",
+	}, baseConn.writtenMethods(), "caller notification after a retired deadline must still be suppressed")
+	require.True(t, serializedTransport.initializedNotificationSent())
+	requireLifecycleLockReleased(t, serializedTransport)
 }
 
 func TestSerializedForwardingTransportHoldsLifecycleLockUntilMatchingResponse(t *testing.T) {
@@ -775,6 +1019,9 @@ type stubSerializedForwardingConnection struct {
 	readResults  chan stubReadResult
 	writeCalls   atomic.Int32
 	closeCalls   atomic.Int32
+	writesMu     sync.Mutex
+	writes       []jsonrpc.Message
+	afterRead    func()
 }
 
 type stubWriteResult struct {
@@ -813,11 +1060,17 @@ func (s *stubSerializedForwardingConnection) enqueueRead(msg jsonrpc.Message, er
 }
 
 func (s *stubSerializedForwardingConnection) Write(
-	_ context.Context,
+	ctx context.Context,
 	_ http.Header,
-	_ jsonrpc.Message,
+	msg jsonrpc.Message,
 ) (ForwardingWriteResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ForwardingWriteResult{}, err
+	}
 	s.writeCalls.Add(1)
+	s.writesMu.Lock()
+	s.writes = append(s.writes, msg)
+	s.writesMu.Unlock()
 	select {
 	case result := <-s.writeResults:
 		return ForwardingWriteResult{
@@ -830,8 +1083,25 @@ func (s *stubSerializedForwardingConnection) Write(
 	}
 }
 
+func (s *stubSerializedForwardingConnection) writtenMethods() []string {
+	s.writesMu.Lock()
+	defer s.writesMu.Unlock()
+	methods := make([]string, 0, len(s.writes))
+	for _, msg := range s.writes {
+		request, ok := msg.(*jsonrpc.Request)
+		if !ok || request == nil {
+			continue
+		}
+		methods = append(methods, request.Method)
+	}
+	return methods
+}
+
 func (s *stubSerializedForwardingConnection) Read(context.Context) (jsonrpc.Message, error) {
 	result := <-s.readResults
+	if s.afterRead != nil {
+		s.afterRead()
+	}
 	return result.msg, result.err
 }
 

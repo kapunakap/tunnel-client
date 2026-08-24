@@ -87,16 +87,17 @@ type fileCloudflaredConfig struct {
 }
 
 type fileMCPConfig struct {
-	ServerURLs            []fileMCPServerURL `yaml:"server_urls"`
-	Commands              []fileMCPCommand   `yaml:"commands"`
-	HTTPProxy             *string            `yaml:"http_proxy"`
-	ClientCert            *string            `yaml:"client_cert"`
-	ClientKey             *string            `yaml:"client_key"`
-	ExtraHeaders          map[string]string  `yaml:"extra_headers"`
-	DiscoveryExtraHeaders map[string]string  `yaml:"discovery_extra_headers"`
-	StartupWaitTimeout    *string            `yaml:"startup_wait_timeout"`
-	ConnectionMaxTTL      *string            `yaml:"connection_max_ttl"`
-	MaxConcurrentRequests *int               `yaml:"max_concurrent_requests"`
+	ServerURLs                       []fileMCPServerURL `yaml:"server_urls"`
+	Commands                         []fileMCPCommand   `yaml:"commands"`
+	HTTPProxy                        *string            `yaml:"http_proxy"`
+	ClientCert                       *string            `yaml:"client_cert"`
+	ClientKey                        *string            `yaml:"client_key"`
+	ExtraHeaders                     map[string]string  `yaml:"extra_headers"`
+	DiscoveryExtraHeaders            map[string]string  `yaml:"discovery_extra_headers"`
+	StartupWaitTimeout               *string            `yaml:"startup_wait_timeout"`
+	StdioSendInitializedNotification *bool              `yaml:"stdio_send_initialized_notification"`
+	ConnectionMaxTTL                 *string            `yaml:"connection_max_ttl"`
+	MaxConcurrentRequests            *int               `yaml:"max_concurrent_requests"`
 }
 
 type fileMCPServerURL struct {
@@ -348,6 +349,7 @@ func (c fileConfig) toEnv(lookupEnv func(string) (string, bool)) (map[string]str
 		env["MCP_DISCOVERY_EXTRA_HEADERS"] = discoveryExtraHeaders
 	}
 	setString(env, "MCP_STARTUP_WAIT_TIMEOUT", c.MCP.StartupWaitTimeout)
+	setBool(env, "MCP_STDIO_SEND_INITIALIZED_NOTIFICATION", c.MCP.StdioSendInitializedNotification)
 	setString(env, "MCP_CONNECTION_MAX_TTL", c.MCP.ConnectionMaxTTL)
 	setInt(env, "MCP_MAX_CONCURRENT_REQUESTS", c.MCP.MaxConcurrentRequests)
 

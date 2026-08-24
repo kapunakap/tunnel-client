@@ -10,7 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -326,7 +326,7 @@ func sessionHeaders(sessionID string) http.Header {
 
 func finalJSONRPCBody(body []byte) []byte {
 	var final []byte
-	for _, rawLine := range bytes.Split(body, []byte("\n")) {
+	for rawLine := range bytes.SplitSeq(body, []byte("\n")) {
 		line := bytes.TrimSpace(rawLine)
 		if payload, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
 			final = append(final[:0], payload...)
@@ -428,7 +428,7 @@ func (r singleClientLoadRun) successfulLatencies() []time.Duration {
 			latencies = append(latencies, latency)
 		}
 	}
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	slices.Sort(latencies)
 	return latencies
 }
 

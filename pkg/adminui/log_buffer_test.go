@@ -153,8 +153,7 @@ func TestLogBufferSubscribeIsBestEffort(t *testing.T) {
 	t.Parallel()
 
 	b := NewLogBufferWithCapacity(10)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	ch := b.Subscribe(ctx)
 	require.NotNil(t, ch)

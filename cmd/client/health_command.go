@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -326,6 +327,10 @@ func printEndpointReport(w io.Writer, label string, endpoint session.EndpointPro
 	_, _ = fmt.Fprintf(w, "%s: %s\n", label, strings.Join(parts, " | "))
 }
 
+// Bound scanner memory to 1 MiB per exposition line without rejecting a valid
+// metric merely because the overall /metrics response is large.
+const maxHealthMetricProbeLineBytes = 1 << 20
+
 func probeControlPlanePoll(baseURL string) healthMetricProbe {
 	target, err := healthurl.Parse(baseURL)
 	if err != nil {
@@ -353,13 +358,15 @@ func probeControlPlanePoll(baseURL string) healthMetricProbe {
 		return probe
 	}
 
-	body, err := io.ReadAll(response.Body)
+	value, ok, err := streamMetricValue(
+		response.Body,
+		"commands_poll_last_successful_timestamp_seconds",
+		maxHealthMetricProbeLineBytes,
+	)
 	if err != nil {
 		probe.Error = err.Error()
 		return probe
 	}
-
-	value, ok := parseMetricValue(string(body), "commands_poll_last_successful_timestamp_seconds")
 	if !ok {
 		probe.Error = "missing commands_poll_last_successful_timestamp_seconds metric"
 		return probe
@@ -371,6 +378,22 @@ func probeControlPlanePoll(baseURL string) healthMetricProbe {
 		probe.Error = "no successful control-plane poll observed"
 	}
 	return probe
+}
+
+func streamMetricValue(reader io.Reader, metricName string, maxLineBytes int) (float64, bool, error) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), maxLineBytes)
+
+	for scanner.Scan() {
+		if value, ok := parseMetricValue(scanner.Text(), metricName); ok {
+			return value, true, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, false, fmt.Errorf("scan metrics response: %w", err)
+	}
+	return 0, false, nil
 }
 
 func parseMetricValue(metrics string, metricName string) (float64, bool) {

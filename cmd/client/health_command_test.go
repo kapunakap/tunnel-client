@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +168,66 @@ func TestHealthCommandRequiresControlPlanePollFailsBeforeFirstSuccessfulPoll(t *
 	require.Contains(t, stdout, "Control-plane poll: FAIL")
 	require.Contains(t, stdout, "no successful control-plane poll observed")
 	require.Contains(t, stdout, "Result: FAIL")
+}
+
+func TestHealthCommandRequiresControlPlanePollAcceptsMetricBeforeOversizedTail(t *testing.T) {
+	t.Parallel()
+
+	server := healthTestServerWithMetrics(
+		t,
+		http.StatusOK,
+		"live",
+		http.StatusOK,
+		"ready",
+		http.StatusOK,
+		"commands_poll_last_successful_timestamp_seconds 1\n"+strings.Repeat("#", maxHealthMetricProbeLineBytes),
+	)
+	t.Cleanup(server.Close)
+
+	stdout, stderr, err := executeCommand(
+		t,
+		map[string]string{},
+		"health",
+		"--url",
+		server.URL,
+		"--require-control-plane-poll",
+	)
+
+	require.NoError(t, err, stderr)
+	require.Empty(t, stderr)
+	require.Contains(t, stdout, "Control-plane poll: PASS")
+	require.Contains(t, stdout, "last_success_unix_seconds=1")
+	require.Contains(t, stdout, "Result: OK")
+}
+
+func TestHealthCommandRequiresControlPlanePollAcceptsMetricAfterOversizedPrefix(t *testing.T) {
+	t.Parallel()
+
+	server := healthTestServerWithMetrics(
+		t,
+		http.StatusOK,
+		"live",
+		http.StatusOK,
+		"ready",
+		http.StatusOK,
+		strings.Repeat("#\n", maxHealthMetricProbeLineBytes)+"commands_poll_last_successful_timestamp_seconds 1\n",
+	)
+	t.Cleanup(server.Close)
+
+	stdout, stderr, err := executeCommand(
+		t,
+		map[string]string{},
+		"health",
+		"--url",
+		server.URL,
+		"--require-control-plane-poll",
+	)
+
+	require.NoError(t, err, stderr)
+	require.Empty(t, stderr)
+	require.Contains(t, stdout, "Control-plane poll: PASS")
+	require.Contains(t, stdout, "last_success_unix_seconds=1")
+	require.Contains(t, stdout, "Result: OK")
 }
 
 func TestHealthCommandWithUnixSocketURLFile(t *testing.T) {

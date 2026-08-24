@@ -65,6 +65,60 @@ func TestRuntimeHarpoonEnforcesRedirectLimit(t *testing.T) {
 	require.Contains(t, err.Error(), "redirect limit exceeded")
 }
 
+func TestRuntimeHarpoonBlocksMethodOverrideHeaders(t *testing.T) {
+	t.Parallel()
+
+	overrideHeaders := []string{
+		"X-HTTP-Method",
+		"X-HTTP-Method-Override",
+		"X-Method-Override",
+	}
+	type receivedRequest struct {
+		headers         http.Header
+		effectiveMethod string
+	}
+	received := make(chan receivedRequest, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		effectiveMethod := r.Method
+		for _, header := range overrideHeaders {
+			if method := r.Header.Get(header); method != "" {
+				effectiveMethod = method
+			}
+		}
+		received <- receivedRequest{
+			headers:         r.Header.Clone(),
+			effectiveMethod: effectiveMethod,
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+
+	server := newRuntimeHarpoonSecurityServer(t, []Target{{
+		Label:   "method-override",
+		BaseURL: runtimeHarpoonSecurityURL(t, target.URL),
+	}})
+	requestHeaders := map[string]string{
+		"Accept": "application/json",
+	}
+	for _, header := range overrideHeaders {
+		requestHeaders[header] = http.MethodDelete
+	}
+
+	_, err := server.callTarget(context.Background(), callTargetRequest{
+		Label:   "method-override",
+		Method:  http.MethodPost,
+		Headers: requestHeaders,
+	})
+	require.NoError(t, err)
+
+	request := <-received
+	require.Equal(t, http.MethodPost, request.effectiveMethod)
+	require.Equal(t, "application/json", request.headers.Get("Accept"))
+	for _, header := range overrideHeaders {
+		require.Empty(t, request.headers.Get(header))
+	}
+}
+
 func newRuntimeHarpoonSecurityServer(t *testing.T, targets []Target) *Server {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

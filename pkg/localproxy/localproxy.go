@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -535,8 +536,7 @@ func resolveBackendFactory(backend BackendName, queueBackend QueueBackendName, f
 }
 
 func findBackendFactory(factories []BackendFactory, name BackendName) BackendFactory {
-	for i := len(factories) - 1; i >= 0; i-- {
-		factory := factories[i]
+	for _, factory := range slices.Backward(factories) {
 		if factory == nil {
 			continue
 		}

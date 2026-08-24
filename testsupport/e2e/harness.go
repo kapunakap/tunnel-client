@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -662,8 +663,7 @@ func (h *Harness) startTunnelClient(t testing.TB) *TunnelClient {
 
 func (h *Harness) shutdown(t testing.TB) {
 	t.Helper()
-	for i := len(h.clients) - 1; i >= 0; i-- {
-		client := h.clients[i]
+	for _, client := range slices.Backward(h.clients) {
 		if client == nil || client.app == nil {
 			continue
 		}

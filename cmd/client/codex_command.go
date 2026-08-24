@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -622,8 +623,8 @@ func readCommandLineOutput(name string, args ...string) (string, error) {
 		return "", err
 	}
 	lines := strings.Split(text, "\n")
-	for idx := len(lines) - 1; idx >= 0; idx-- {
-		if line := strings.TrimSpace(lines[idx]); line != "" {
+	for _, outputLine := range slices.Backward(lines) {
+		if line := strings.TrimSpace(outputLine); line != "" {
 			return line, nil
 		}
 	}

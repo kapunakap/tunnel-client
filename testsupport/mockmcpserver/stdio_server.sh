@@ -29,6 +29,16 @@ while IFS= read -r line; do
   fi
 
   case "$line" in
+    *\"server/discover\"*)
+      if [[ -n "${MOCK_MCP_MESSAGE_LOG:-}" ]]; then
+        printf 'server/discover\n' >> "$MOCK_MCP_MESSAGE_LOG"
+      fi
+      if [[ "${MOCK_MCP_SERVER_DISCOVER_MODE:-}" == "modern" ]]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"modern-bash","version":"0.0"}}}}\n' "$id"
+      else
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      fi
+      ;;
     *\"initialize\"*)
       if [[ -n "${MOCK_MCP_MESSAGE_LOG:-}" ]]; then
         printf 'initialize\n' >> "$MOCK_MCP_MESSAGE_LOG"

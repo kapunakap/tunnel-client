@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -22,6 +23,246 @@ func TestNewSerializedForwardingTransportNilBaseReturnsNil(t *testing.T) {
 	require.Nil(t, NewSerializedForwardingTransport(nil))
 	require.Nil(t, NewSerializedForwardingTransportWithDeadlineRetirement(nil))
 	require.Nil(t, NewStdioForwardingTransport(nil))
+	require.Nil(t, NewStdioForwardingTransportWithDiscoveryCompatibility(nil, false))
+}
+
+func TestStdioDiscoveryCompatibilityFallsBackToLegacyInitialize(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	discoverID := mustMakeID(t, "discover")
+	readCount := 0
+	baseConn.readFunc = func(context.Context) (jsonrpc.Message, error) {
+		readCount++
+		if readCount == 1 {
+			return &jsonrpc.Response{
+				ID: discoverID,
+				Error: &jsonrpc.Error{
+					Code:    jsonrpc.CodeMethodNotFound,
+					Message: "method not found",
+				},
+			}, nil
+		}
+		return &jsonrpc.Response{
+			ID: baseConn.lastWrittenRequestID(),
+			Result: json.RawMessage(`{
+				"protocolVersion":"2024-11-05",
+				"capabilities":{"tools":{}},
+				"serverInfo":{"name":"legacy","version":"1.0"},
+				"instructions":"legacy instructions"
+			}`),
+		}, nil
+	}
+
+	transport := NewStdioForwardingTransportWithDiscoveryCompatibility(
+		&stubSerializedForwardingTransport{conn: baseConn},
+		false,
+	)
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{
+		ID:     discoverID,
+		Method: serverDiscoverMethod,
+		Params: validDiscoveryParams(),
+	})
+	require.NoError(t, err)
+
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	response, ok := msg.(*jsonrpc.Response)
+	require.True(t, ok)
+	require.Equal(t, discoverID, response.ID)
+	require.Nil(t, response.Error)
+
+	var result struct {
+		ResultType        string          `json:"resultType"`
+		SupportedVersions []string        `json:"supportedVersions"`
+		Capabilities      json.RawMessage `json:"capabilities"`
+		Meta              map[string]any  `json:"_meta"`
+		Instructions      string          `json:"instructions"`
+	}
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	require.Equal(t, "complete", result.ResultType)
+	require.Equal(t, []string{"2024-11-05"}, result.SupportedVersions)
+	require.JSONEq(t, `{"tools":{}}`, string(result.Capabilities))
+	require.Equal(t, "legacy instructions", result.Instructions)
+	require.Equal(t, map[string]any{
+		"name":    "legacy",
+		"version": "1.0",
+	}, result.Meta["io.modelcontextprotocol/serverInfo"])
+	require.Equal(t, []string{
+		serverDiscoverMethod,
+		"initialize",
+		initializedNotificationMethod,
+	}, baseConn.writtenMethods())
+	requireLifecycleLockReleased(t, transport.(*serializedForwardingTransport))
+
+	duplicate, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = duplicate.Write(context.Background(), nil, &jsonrpc.Request{Method: initializedNotificationMethod})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		serverDiscoverMethod,
+		"initialize",
+		initializedNotificationMethod,
+	}, baseConn.writtenMethods(), "compatibility notification must not be duplicated")
+}
+
+func TestStdioDiscoveryCompatibilityPreservesNativeDiscovery(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	discoverID := mustMakeID(t, "native-discover")
+	nativeResponse := &jsonrpc.Response{
+		ID:     discoverID,
+		Result: json.RawMessage(`{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}`),
+	}
+	baseConn.enqueueRead(nativeResponse, nil)
+
+	transport := NewStdioForwardingTransportWithDiscoveryCompatibility(
+		&stubSerializedForwardingTransport{conn: baseConn},
+		false,
+	)
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{
+		ID:     discoverID,
+		Method: serverDiscoverMethod,
+		Params: validDiscoveryParams(),
+	})
+	require.NoError(t, err)
+
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	require.Same(t, nativeResponse, msg)
+	require.Equal(t, []string{serverDiscoverMethod}, baseConn.writtenMethods())
+	requireLifecycleLockReleased(t, transport.(*serializedForwardingTransport))
+}
+
+func TestStdioDiscoveryCompatibilityDoesNotFallbackForUnrelatedError(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	discoverID := mustMakeID(t, "invalid-params")
+	baseConn.enqueueRead(&jsonrpc.Response{
+		ID: discoverID,
+		Error: &jsonrpc.Error{
+			Code:    jsonrpc.CodeInvalidParams,
+			Message: "invalid params",
+		},
+	}, nil)
+
+	transport := NewStdioForwardingTransportWithDiscoveryCompatibility(
+		&stubSerializedForwardingTransport{conn: baseConn},
+		false,
+	)
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{
+		ID:     discoverID,
+		Method: serverDiscoverMethod,
+		Params: validDiscoveryParams(),
+	})
+	require.NoError(t, err)
+
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, discoverID, msg.(*jsonrpc.Response).ID)
+	require.Equal(t, []string{serverDiscoverMethod}, baseConn.writtenMethods())
+	requireLifecycleLockReleased(t, transport.(*serializedForwardingTransport))
+}
+
+func TestStdioDiscoveryCompatibilityDoesNotFallbackOnReadFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name string
+		err  error
+	}{
+		{name: "timeout", err: context.DeadlineExceeded},
+		{name: "transport", err: errors.New("stdio read failed")},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			baseConn := newStubSerializedForwardingConnection()
+			discoverID := mustMakeID(t, "read-"+testCase.name)
+			baseConn.enqueueRead(nil, testCase.err)
+			transport := NewStdioForwardingTransportWithDiscoveryCompatibility(
+				&stubSerializedForwardingTransport{conn: baseConn},
+				false,
+			)
+			conn, err := transport.Connect(context.Background())
+			require.NoError(t, err)
+			_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{
+				ID:     discoverID,
+				Method: serverDiscoverMethod,
+				Params: validDiscoveryParams(),
+			})
+			require.NoError(t, err)
+
+			_, err = conn.Read(context.Background())
+			require.ErrorIs(t, err, testCase.err)
+			require.Equal(t, []string{serverDiscoverMethod}, baseConn.writtenMethods())
+			requireLifecycleLockReleased(t, transport.(*serializedForwardingTransport))
+		})
+	}
+}
+
+func TestStdioDiscoveryCompatibilityDoesNotSynthesizeInvalidInitializeResult(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	discoverID := mustMakeID(t, "invalid-initialize")
+	readCount := 0
+	baseConn.readFunc = func(context.Context) (jsonrpc.Message, error) {
+		readCount++
+		if readCount == 1 {
+			return &jsonrpc.Response{
+				ID: discoverID,
+				Error: &jsonrpc.Error{
+					Code:    jsonrpc.CodeMethodNotFound,
+					Message: "method not found",
+				},
+			}, nil
+		}
+		return &jsonrpc.Response{ID: baseConn.lastWrittenRequestID(), Result: json.RawMessage(`{"protocolVersion":"2024-11-05"}`)}, nil
+	}
+
+	transport := NewStdioForwardingTransportWithDiscoveryCompatibility(
+		&stubSerializedForwardingTransport{conn: baseConn},
+		false,
+	)
+	conn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = conn.Write(context.Background(), nil, &jsonrpc.Request{
+		ID:     discoverID,
+		Method: serverDiscoverMethod,
+		Params: validDiscoveryParams(),
+	})
+	require.NoError(t, err)
+
+	msg, err := conn.Read(context.Background())
+	require.NoError(t, err)
+	response := msg.(*jsonrpc.Response)
+	require.Equal(t, discoverID, response.ID)
+	var rpcErr *jsonrpc.Error
+	require.ErrorAs(t, response.Error, &rpcErr)
+	require.Equal(t, int64(jsonrpc.CodeInternalError), rpcErr.Code)
+	require.Equal(t, []string{serverDiscoverMethod, "initialize"}, baseConn.writtenMethods())
+	requireLifecycleLockReleased(t, transport.(*serializedForwardingTransport))
+}
+
+func validDiscoveryParams() json.RawMessage {
+	return json.RawMessage(`{
+		"_meta":{
+			"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+			"io.modelcontextprotocol/clientInfo":{"name":"test-client","version":"1.0"},
+			"io.modelcontextprotocol/clientCapabilities":{}
+		}
+	}`)
 }
 
 func TestStdioDeadlineRetirementWrapperPreservesLegacyNotificationForwarding(t *testing.T) {
@@ -1022,6 +1263,7 @@ type stubSerializedForwardingConnection struct {
 	writesMu     sync.Mutex
 	writes       []jsonrpc.Message
 	afterRead    func()
+	readFunc     func(context.Context) (jsonrpc.Message, error)
 }
 
 type stubWriteResult struct {
@@ -1097,7 +1339,22 @@ func (s *stubSerializedForwardingConnection) writtenMethods() []string {
 	return methods
 }
 
-func (s *stubSerializedForwardingConnection) Read(context.Context) (jsonrpc.Message, error) {
+func (s *stubSerializedForwardingConnection) lastWrittenRequestID() jsonrpc.ID {
+	s.writesMu.Lock()
+	defer s.writesMu.Unlock()
+	for i := len(s.writes) - 1; i >= 0; i-- {
+		request, ok := s.writes[i].(*jsonrpc.Request)
+		if ok && request != nil && request.ID.IsValid() {
+			return request.ID
+		}
+	}
+	return jsonrpc.ID{}
+}
+
+func (s *stubSerializedForwardingConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
+	if s.readFunc != nil {
+		return s.readFunc(ctx)
+	}
 	result := <-s.readResults
 	if s.afterRead != nil {
 		s.afterRead()

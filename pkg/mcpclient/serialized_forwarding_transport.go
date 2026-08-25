@@ -2,10 +2,12 @@ package mcpclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
@@ -19,7 +21,7 @@ import (
 // until the matching final JSON-RPC response, an error, or Close. Notifications
 // without ids release immediately after the write because no response is legal.
 func NewSerializedForwardingTransport(base ForwardingTransport) ForwardingTransport {
-	return newSerializedForwardingTransport(base, false, false)
+	return newSerializedForwardingTransport(base, false, false, false)
 }
 
 // NewSerializedForwardingTransportWithDeadlineRetirement wraps a shared
@@ -36,7 +38,7 @@ func NewSerializedForwardingTransport(base ForwardingTransport) ForwardingTransp
 // later request. Admitting the next request after retirement keeps terminal
 // responses flowing even when the timed-out server work never replies.
 func NewSerializedForwardingTransportWithDeadlineRetirement(base ForwardingTransport) ForwardingTransport {
-	return newSerializedForwardingTransport(base, true, false)
+	return newSerializedForwardingTransport(base, true, false, false)
 }
 
 // NewStdioForwardingTransport opts a shared stdio transport into the
@@ -48,19 +50,27 @@ func NewSerializedForwardingTransportWithDeadlineRetirement(base ForwardingTrans
 // stdio server. Callers must choose this wrapper explicitly so legacy stdio
 // servers keep verbatim forwarding by default.
 func NewStdioForwardingTransport(base ForwardingTransport) ForwardingTransport {
-	return newSerializedForwardingTransport(base, true, true)
+	return newSerializedForwardingTransport(base, true, true, true)
 }
 
-func newSerializedForwardingTransport(base ForwardingTransport, retireOnDeadline, ensureInitialized bool) ForwardingTransport {
+// NewStdioForwardingTransportWithDiscoveryCompatibility enables the stdio
+// discovery fallback while preserving the caller's existing initialized
+// notification preference for ordinary initialize requests.
+func NewStdioForwardingTransportWithDiscoveryCompatibility(base ForwardingTransport, ensureInitialized bool) ForwardingTransport {
+	return newSerializedForwardingTransport(base, true, ensureInitialized, true)
+}
+
+func newSerializedForwardingTransport(base ForwardingTransport, retireOnDeadline, ensureInitialized, discoveryCompatibility bool) ForwardingTransport {
 	if base == nil {
 		return nil
 	}
 	return &serializedForwardingTransport{
-		base:               base,
-		lifecycleSlot:      make(chan struct{}, 1),
-		retireOnDeadline:   retireOnDeadline,
-		ensureInitialized:  ensureInitialized,
-		retiredResponseIDs: make(map[jsonrpc.ID]struct{}),
+		base:                   base,
+		lifecycleSlot:          make(chan struct{}, 1),
+		retireOnDeadline:       retireOnDeadline,
+		ensureInitialized:      ensureInitialized,
+		discoveryCompatibility: discoveryCompatibility,
+		retiredResponseIDs:     make(map[jsonrpc.ID]struct{}),
 	}
 }
 
@@ -72,6 +82,10 @@ type serializedForwardingTransport struct {
 	// the caller's lifecycle messages verbatim, but older callers can omit the
 	// required notification and leave a compliant stdio server waiting forever.
 	ensureInitialized bool
+	// discoveryCompatibility probes stdio targets with server/discover and
+	// translates an explicit method-not-found response into the legacy
+	// initialize lifecycle. It is deliberately disabled for HTTP and Harpoon.
+	discoveryCompatibility bool
 
 	retiredMu          sync.Mutex
 	retiredResponseIDs map[jsonrpc.ID]struct{}
@@ -83,6 +97,10 @@ type serializedForwardingTransport struct {
 const maxRetiredResponseIDs = 1024
 
 const initializedNotificationMethod = "notifications/initialized"
+const serverDiscoverMethod = "server/discover"
+const legacyInitializeProtocolVersion = "2025-11-25"
+
+var discoveryFallbackID atomic.Uint64
 
 func (t *serializedForwardingTransport) Connect(
 	ctx context.Context,
@@ -201,15 +219,19 @@ type serializedForwardingConnection struct {
 	acquireLifecycle func(context.Context) error
 	releaseLifecycle func()
 
-	stateMu           sync.Mutex
-	lockHeld          bool
-	writeStarted      bool
-	writeCompleted    bool
-	awaitingResponse  bool
-	expectedID        jsonrpc.ID
-	requestMethod     string
-	deadlineRetirable bool
-	retired           bool
+	stateMu                sync.Mutex
+	lockHeld               bool
+	writeStarted           bool
+	writeCompleted         bool
+	awaitingResponse       bool
+	expectedID             jsonrpc.ID
+	requestMethod          string
+	deadlineRetirable      bool
+	retired                bool
+	discoveryFallback      bool
+	discoveryRequestParams json.RawMessage
+	discoveryOriginalID    jsonrpc.ID
+	discoveryInitializeID  jsonrpc.ID
 }
 
 func (c *serializedForwardingConnection) Write(
@@ -228,6 +250,14 @@ func (c *serializedForwardingConnection) Write(
 	}
 	if method == "initialize" && c.transport != nil {
 		c.transport.resetInitializedNotification()
+	}
+	if method == serverDiscoverMethod && c.transport != nil && c.transport.discoveryCompatibility {
+		c.stateMu.Lock()
+		if request, ok := msg.(*jsonrpc.Request); ok {
+			c.discoveryRequestParams = cloneRawJSON(request.Params)
+		}
+		c.discoveryOriginalID = expectedID
+		c.stateMu.Unlock()
 	}
 	if c.shouldSuppressInitializedNotification(msg) {
 		c.markWriteCompleted(true)
@@ -274,6 +304,27 @@ func (c *serializedForwardingConnection) Read(ctx context.Context) (jsonrpc.Mess
 		if c.transport != nil && c.transport.shouldDropRetiredMessage(msg) {
 			continue
 		}
+		if response, ok := msg.(*jsonrpc.Response); ok {
+			if initRequest, ok, err := c.prepareDiscoveryFallback(response); err != nil {
+				c.release()
+				return nil, err
+			} else if ok {
+				if err := c.writeDiscoveryFallbackInitialize(ctx, initRequest); err != nil {
+					c.release()
+					return nil, err
+				}
+				continue
+			}
+			if translated, ok, err := c.completeDiscoveryFallback(ctx, response); ok {
+				if err != nil {
+					c.release()
+					return nil, err
+				}
+				c.shouldReleaseAfterRead(response)
+				c.release()
+				return translated, nil
+			}
+		}
 		if c.shouldEnsureInitializedNotification(msg) {
 			if err := c.writeInitializedNotification(ctx); err != nil {
 				c.release()
@@ -288,11 +339,15 @@ func (c *serializedForwardingConnection) Read(ctx context.Context) (jsonrpc.Mess
 }
 
 func (c *serializedForwardingConnection) shouldSuppressInitializedNotification(msg jsonrpc.Message) bool {
-	if c == nil || c.transport == nil || !c.transport.ensureInitialized || !c.transport.initializedNotificationSent() {
+	if c == nil || c.transport == nil || !c.transport.tracksInitializedNotification() || !c.transport.initializedNotificationSent() {
 		return false
 	}
 	request, ok := msg.(*jsonrpc.Request)
 	return ok && request != nil && !request.ID.IsValid() && request.Method == initializedNotificationMethod
+}
+
+func (t *serializedForwardingTransport) tracksInitializedNotification() bool {
+	return t != nil && (t.ensureInitialized || t.discoveryCompatibility)
 }
 
 func (c *serializedForwardingConnection) shouldEnsureInitializedNotification(msg jsonrpc.Message) bool {
@@ -348,12 +403,174 @@ func (t *serializedForwardingTransport) markInitializedNotificationSent() {
 }
 
 func (t *serializedForwardingTransport) resetInitializedNotification() {
-	if t == nil || !t.ensureInitialized {
+	if t == nil || !t.tracksInitializedNotification() {
 		return
 	}
 	t.initializedMu.Lock()
 	t.initializedNotification = false
 	t.initializedMu.Unlock()
+}
+
+type discoveryRequestParams struct {
+	Meta map[string]json.RawMessage `json:"_meta"`
+}
+
+type legacyInitializeParams struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	Capabilities    json.RawMessage `json:"capabilities"`
+	ClientInfo      json.RawMessage `json:"clientInfo"`
+}
+
+type legacyInitializeResult struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	Capabilities    json.RawMessage `json:"capabilities"`
+	ServerInfo      json.RawMessage `json:"serverInfo"`
+	Instructions    string          `json:"instructions,omitempty"`
+}
+
+type discoveryCompatibilityResult struct {
+	ResultType        string          `json:"resultType"`
+	SupportedVersions []string        `json:"supportedVersions"`
+	Capabilities      json.RawMessage `json:"capabilities"`
+	Meta              map[string]any  `json:"_meta,omitempty"`
+	Instructions      string          `json:"instructions,omitempty"`
+}
+
+func (c *serializedForwardingConnection) prepareDiscoveryFallback(response *jsonrpc.Response) (*jsonrpc.Request, bool, error) {
+	if c == nil || c.transport == nil || !c.transport.discoveryCompatibility || response == nil || response.Error == nil {
+		return nil, false, nil
+	}
+	var rpcErr *jsonrpc.Error
+	if !errors.As(response.Error, &rpcErr) || rpcErr == nil || rpcErr.Code != jsonrpc.CodeMethodNotFound {
+		return nil, false, nil
+	}
+
+	c.stateMu.Lock()
+	isCandidate := c.lockHeld && c.awaitingResponse && c.requestMethod == serverDiscoverMethod &&
+		c.expectedID.IsValid() && response.ID == c.expectedID && response.ID == c.discoveryOriginalID
+	rawParams := cloneRawJSON(c.discoveryRequestParams)
+	c.stateMu.Unlock()
+	if !isCandidate {
+		return nil, false, nil
+	}
+
+	var params discoveryRequestParams
+	if len(rawParams) == 0 || json.Unmarshal(rawParams, &params) != nil || params.Meta == nil {
+		return nil, false, nil
+	}
+	protocolVersion, protocolOK := params.Meta["io.modelcontextprotocol/protocolVersion"]
+	clientInfo, clientInfoOK := params.Meta["io.modelcontextprotocol/clientInfo"]
+	clientCapabilities, capabilitiesOK := params.Meta["io.modelcontextprotocol/clientCapabilities"]
+	var requestedVersion string
+	if !protocolOK || json.Unmarshal(protocolVersion, &requestedVersion) != nil || requestedVersion == "" ||
+		!clientInfoOK || !validJSONObject(clientInfo) || !capabilitiesOK || !validJSONObject(clientCapabilities) {
+		return nil, false, nil
+	}
+
+	initializeParams, err := json.Marshal(legacyInitializeParams{
+		ProtocolVersion: legacyInitializeProtocolVersion,
+		Capabilities:    clientCapabilities,
+		ClientInfo:      clientInfo,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("encode legacy MCP initialize parameters: %w", err)
+	}
+	initializeID, err := jsonrpc.MakeID(fmt.Sprintf("tunnel-client-legacy-initialize-%d", discoveryFallbackID.Add(1)))
+	if err != nil {
+		return nil, false, fmt.Errorf("create legacy MCP initialize request ID: %w", err)
+	}
+
+	c.stateMu.Lock()
+	c.discoveryFallback = true
+	c.discoveryInitializeID = initializeID
+	c.expectedID = initializeID
+	c.requestMethod = "initialize"
+	c.awaitingResponse = true
+	c.writeStarted = true
+	c.writeCompleted = false
+	c.stateMu.Unlock()
+
+	return &jsonrpc.Request{ID: initializeID, Method: "initialize", Params: initializeParams}, true, nil
+}
+
+func (c *serializedForwardingConnection) writeDiscoveryFallbackInitialize(ctx context.Context, request *jsonrpc.Request) error {
+	result, err := c.base.Write(ctx, nil, request)
+	c.markWriteCompleted(err == nil)
+	if err != nil {
+		return fmt.Errorf("send legacy MCP initialize after server/discover: %w", err)
+	}
+	if result.PreservedError != nil {
+		return fmt.Errorf("send legacy MCP initialize after server/discover: downstream returned an MCP error")
+	}
+	if result.StatusCode != 0 && (result.StatusCode < http.StatusOK || result.StatusCode >= http.StatusMultipleChoices) {
+		return fmt.Errorf("send legacy MCP initialize after server/discover: downstream returned status %d", result.StatusCode)
+	}
+	return nil
+}
+
+func (c *serializedForwardingConnection) completeDiscoveryFallback(ctx context.Context, response *jsonrpc.Response) (*jsonrpc.Response, bool, error) {
+	if c == nil || response == nil {
+		return nil, false, nil
+	}
+	c.stateMu.Lock()
+	isFallbackResponse := c.discoveryFallback && c.expectedID.IsValid() && response.ID == c.discoveryInitializeID
+	originalID := c.discoveryOriginalID
+	c.stateMu.Unlock()
+	if !isFallbackResponse {
+		return nil, false, nil
+	}
+
+	if response.Error != nil {
+		return &jsonrpc.Response{ID: originalID, Error: response.Error}, true, nil
+	}
+
+	result, err := discoveryResultFromLegacyInitialize(response.Result)
+	if err != nil {
+		return &jsonrpc.Response{
+			ID: originalID,
+			Error: &jsonrpc.Error{
+				Code:    jsonrpc.CodeInternalError,
+				Message: err.Error(),
+			},
+		}, true, nil
+	}
+	if err := c.writeInitializedNotification(ctx); err != nil {
+		return nil, true, err
+	}
+	return &jsonrpc.Response{ID: originalID, Result: result}, true, nil
+}
+
+func discoveryResultFromLegacyInitialize(raw json.RawMessage) (json.RawMessage, error) {
+	var initializeResult legacyInitializeResult
+	if len(raw) == 0 || json.Unmarshal(raw, &initializeResult) != nil {
+		return nil, errors.New("legacy MCP initialize returned an invalid result")
+	}
+	if initializeResult.ProtocolVersion == "" || !validJSONObject(initializeResult.Capabilities) || !validJSONObject(initializeResult.ServerInfo) {
+		return nil, errors.New("legacy MCP initialize returned an incomplete result")
+	}
+
+	meta := map[string]any{
+		"io.modelcontextprotocol/serverInfo": json.RawMessage(initializeResult.ServerInfo),
+	}
+	return json.Marshal(discoveryCompatibilityResult{
+		ResultType:        "complete",
+		SupportedVersions: []string{initializeResult.ProtocolVersion},
+		Capabilities:      initializeResult.Capabilities,
+		Meta:              meta,
+		Instructions:      initializeResult.Instructions,
+	})
+}
+
+func validJSONObject(raw json.RawMessage) bool {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return false
+	}
+	var object map[string]json.RawMessage
+	return json.Unmarshal(raw, &object) == nil && object != nil
+}
+
+func cloneRawJSON(raw json.RawMessage) json.RawMessage {
+	return append(json.RawMessage(nil), raw...)
 }
 
 func (c *serializedForwardingConnection) Close() error {

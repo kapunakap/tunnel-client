@@ -33,6 +33,167 @@ func TestHarnessStdioLegacyDefaultDoesNotInjectInitializedNotification(t *testin
 	runStdioInitializeThenToolScenario(t, false, "initialize\ntools/call\n")
 }
 
+func TestHarnessStdioServerDiscoverFallsBackToLegacyInitialize(t *testing.T) {
+	t.Setenv("MOCK_MCP_REQUIRE_INITIALIZED", "1")
+	messageLog := t.TempDir() + "/stdio-messages.log"
+	t.Setenv("MOCK_MCP_MESSAGE_LOG", messageLog)
+
+	discoverCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-discover",
+			json.RawMessage(`{
+				"jsonrpc":"2.0",
+				"id":"discover-1",
+				"method":"server/discover",
+				"params":{
+					"_meta":{
+						"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+						"io.modelcontextprotocol/clientInfo":{"name":"chatgpt","version":"test"},
+						"io.modelcontextprotocol/clientCapabilities":{}
+					}
+				}
+			}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: "cmd-discover",
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) || resp.ResponseCode != http.StatusOK {
+					tb.Fatalf("discovery response = type %q status %d", resp.ResponseType, resp.ResponseCode)
+				}
+				var wire struct {
+					ID     string `json:"id"`
+					Result struct {
+						ResultType        string                     `json:"resultType"`
+						SupportedVersions []string                   `json:"supportedVersions"`
+						Capabilities      map[string]any             `json:"capabilities"`
+						Meta              map[string]json.RawMessage `json:"_meta"`
+					} `json:"result"`
+				}
+				if err := json.Unmarshal(resp.JSONResponse, &wire); err != nil {
+					tb.Fatalf("decode discovery response: %v", err)
+				}
+				if wire.ID != "discover-1" || wire.Result.ResultType != "complete" {
+					tb.Fatalf("unexpected discovery identity/result: %+v", wire)
+				}
+				if len(wire.Result.SupportedVersions) != 1 || wire.Result.SupportedVersions[0] != "2024-11-05" {
+					tb.Fatalf("unexpected legacy versions: %v", wire.Result.SupportedVersions)
+				}
+				if _, ok := wire.Result.Capabilities["tools"]; !ok {
+					tb.Fatalf("legacy capabilities missing tools: %v", wire.Result.Capabilities)
+				}
+				var serverInfo map[string]string
+				if err := json.Unmarshal(wire.Result.Meta["io.modelcontextprotocol/serverInfo"], &serverInfo); err != nil {
+					tb.Fatalf("decode synthetic serverInfo: %v", err)
+				}
+				if serverInfo["name"] != "bash" {
+					tb.Fatalf("unexpected synthetic serverInfo: %v", serverInfo)
+				}
+			},
+		}},
+	}
+	toolCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-tool-after-discover",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"tool-after-discover","method":"tools/call","params":{"name":"hello","arguments":{"name":"Ada"}}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: "cmd-tool-after-discover",
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) || resp.ResponseCode != http.StatusOK {
+					tb.Fatalf("tool response = type %q status %d", resp.ResponseType, resp.ResponseCode)
+				}
+				if !bytes.Contains(resp.JSONResponse, []byte(`"message":"hello Ada"`)) {
+					tb.Fatalf("unexpected tool response: %s", string(resp.JSONResponse))
+				}
+			},
+		}},
+	}
+
+	h := harnesspkg.NewHarness(t,
+		harnesspkg.WithMCPCommand(mockmcpserver.StdioServerCommand(t)),
+		harnesspkg.WithScenarioTimeout(4*time.Second),
+		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, toolCommand)),
+	)
+	h.ExecuteScenarious(t)
+
+	messages, err := os.ReadFile(messageLog)
+	if err != nil {
+		t.Fatalf("read stdio message log: %v", err)
+	}
+	if got, want := string(messages), "server/discover\ninitialize\nnotifications/initialized\ntools/call\n"; got != want {
+		t.Fatalf("unexpected stdio compatibility sequence: got %q want %q", got, want)
+	}
+}
+
+func TestHarnessStdioServerDiscoverPreservesModernNativePath(t *testing.T) {
+	t.Setenv("MOCK_MCP_SERVER_DISCOVER_MODE", "modern")
+	messageLog := t.TempDir() + "/stdio-messages.log"
+	t.Setenv("MOCK_MCP_MESSAGE_LOG", messageLog)
+
+	discoverCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-modern-discover",
+			json.RawMessage(`{
+				"jsonrpc":"2.0",
+				"id":"modern-discover-1",
+				"method":"server/discover",
+				"params":{
+					"_meta":{
+						"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+						"io.modelcontextprotocol/clientInfo":{"name":"chatgpt","version":"test"},
+						"io.modelcontextprotocol/clientCapabilities":{}
+					}
+				}
+			}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: "cmd-modern-discover",
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				var wire struct {
+					ID     string `json:"id"`
+					Result struct {
+						ResultType        string   `json:"resultType"`
+						SupportedVersions []string `json:"supportedVersions"`
+					} `json:"result"`
+				}
+				if err := json.Unmarshal(resp.JSONResponse, &wire); err != nil {
+					tb.Fatalf("decode native discovery response: %v", err)
+				}
+				if wire.ID != "modern-discover-1" || wire.Result.ResultType != "complete" ||
+					len(wire.Result.SupportedVersions) != 1 || wire.Result.SupportedVersions[0] != "2026-07-28" {
+					tb.Fatalf("unexpected native discovery response: %+v", wire)
+				}
+			},
+		}},
+	}
+	toolCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-modern-tool",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"modern-tool-1","method":"tools/call","params":{"name":"hello","arguments":{"name":"Ada"}}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-modern-tool"}},
+	}
+
+	h := harnesspkg.NewHarness(t,
+		harnesspkg.WithMCPCommand(mockmcpserver.StdioServerCommand(t)),
+		harnesspkg.WithScenarioTimeout(4*time.Second),
+		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, toolCommand)),
+	)
+	h.ExecuteScenarious(t)
+
+	messages, err := os.ReadFile(messageLog)
+	if err != nil {
+		t.Fatalf("read stdio message log: %v", err)
+	}
+	if got, want := string(messages), "server/discover\ntools/call\n"; got != want {
+		t.Fatalf("modern discovery was translated unexpectedly: got %q want %q", got, want)
+	}
+}
+
 func runStdioInitializeThenToolScenario(t *testing.T, sendInitializedNotification bool, wantMessages string) {
 	t.Helper()
 

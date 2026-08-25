@@ -77,6 +77,8 @@ jobs:
         run: bash ./scripts/publish_homebrew_formula_test.sh
       - name: Test latest stable Homebrew publication wrapper
         run: bash ./scripts/publish_latest_homebrew_formula_test.sh
+      - name: Test release provenance tooling
+        run: bash ./scripts/release_provenance_test.sh
       - name: Validate bundled cloudflared manifest
         run: |
           set -euo pipefail
@@ -958,6 +960,7 @@ jobs:
             for file in *.zip *.tar.gz *.spdx.json *-licenses.txt *-scan-manifest.json SHA256SUMS.txt; do
               printf '%s/%s\n' "${PUBLIC_BASE_URL}" "${file}"
             done
+            printf '%s/%s\n' "${PUBLIC_BASE_URL}" "tunnel-client-${GITHUB_REF_NAME}-provenance.sigstore.json"
           } > PUBLIC_URLS.txt
 
       - name: Verify release artifact contract
@@ -1041,6 +1044,7 @@ jobs:
             grep -F "  ${source_archive}" SHA256SUMS.txt >/dev/null
             grep -Fx "${PUBLIC_BASE_URL}/${source_archive}" PUBLIC_URLS.txt >/dev/null
           done
+          grep -Fx "${PUBLIC_BASE_URL}/tunnel-client-${GITHUB_REF_NAME}-provenance.sigstore.json" PUBLIC_URLS.txt >/dev/null
 
           assert_manifest_artifact() {
             local manifest="$1"
@@ -1128,9 +1132,23 @@ jobs:
           assert_manifest_artifact "${runtime_cloudflared_manifest}" "${cloudflared_sources[0]}"
 
       - name: Attest release artifact provenance
+        id: release_provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/public/*
+
+      - name: Stage and verify release provenance bundle
+        run: |
+          set -euo pipefail
+          bundle_name="tunnel-client-${GITHUB_REF_NAME}-provenance.sigstore.json"
+          bundle_path="${{ steps.release_provenance.outputs.bundle-path }}"
+          test -f "${bundle_path}"
+          cp "${bundle_path}" "dist/public/${bundle_name}"
+          ./scripts/verify_release_provenance.sh \
+            --bundle "dist/public/${bundle_name}" \
+            --artifact-dir dist/public \
+            --release "${GITHUB_REF_NAME}" \
+            --source-digest "${GITHUB_SHA}"
 
       - name: Verify Azure CLI on macOS
         run: |
@@ -1193,7 +1211,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          draft: false
+          draft: true
           prerelease: ${{ steps.release_meta.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: |
@@ -1202,8 +1220,54 @@ jobs:
             dist/public/*.spdx.json
             dist/public/*-licenses.txt
             dist/public/*-scan-manifest.json
+            dist/public/*-provenance.sigstore.json
             dist/public/SHA256SUMS.txt
             dist/public/PUBLIC_URLS.txt
+
+      - name: Verify draft release provenance bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "${tmp_dir}"' EXIT
+          stem="tunnel-client-runtime-${GITHUB_REF_NAME}-linux-amd64"
+          bundle="tunnel-client-${GITHUB_REF_NAME}-provenance.sigstore.json"
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir "${tmp_dir}" \
+            --pattern "${stem}.zip" \
+            --pattern "${stem}.spdx.json" \
+            --pattern "${stem}-licenses.txt" \
+            --pattern SHA256SUMS.txt \
+            --pattern "${bundle}"
+          for file in "${stem}.zip" "${stem}.spdx.json" "${stem}-licenses.txt" SHA256SUMS.txt "${bundle}"; do
+            test -f "${tmp_dir}/${file}"
+          done
+          for subject in "${stem}.zip" "${stem}.spdx.json" "${stem}-licenses.txt" SHA256SUMS.txt; do
+            gh attestation verify "${tmp_dir}/${subject}" \
+              --bundle "${tmp_dir}/${bundle}" \
+              --repo openai/tunnel-client \
+              --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
+              --source-ref "refs/tags/${GITHUB_REF_NAME}" \
+              --source-digest "${GITHUB_SHA}" \
+              --signer-digest "${GITHUB_SHA}" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --deny-self-hosted-runners
+          done
+          ./scripts/verify_release_archive.sh \
+            --flavor runtime \
+            --archive "${tmp_dir}/${stem}.zip" \
+            --sbom "${tmp_dir}/${stem}.spdx.json" \
+            --checksums "${tmp_dir}/SHA256SUMS.txt"
+
+      - name: Publish verified GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false
 
   container:
     name: Publish container

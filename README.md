@@ -240,9 +240,11 @@ prove that any release archive contains those bytes.
 ### Validate a downloaded release
 
 Releases produced by the current release workflow publish a matching SPDX 2.3
-sidecar for each ZIP, embed the same sidecar in the ZIP, and cover both files
-in `SHA256SUMS.txt`. Older releases without `.spdx.json` sidecars cannot be
-artifact-validated this way. Use the release sidecar, not a checked-in
+sidecar for each ZIP, embed the same sidecar in the ZIP, cover both files in
+`SHA256SUMS.txt`, and publish the workflow's signed Sigstore provenance bundle.
+Older releases without `.spdx.json` sidecars cannot be archive/SBOM-validated
+this way; releases without a `*-provenance.sigstore.json` bundle cannot be
+provenance-validated this way. Use the release sidecar, not a checked-in
 baseline, to validate downloaded bytes.
 
 From a checkout of this public repository at the matching release tag, replace
@@ -257,23 +259,51 @@ flavor=runtime
 prefix=tunnel-client-runtime
 stem="${prefix}-${release}-${platform}"
 base="https://github.com/openai/tunnel-client/releases/download/${release}"
+bundle="tunnel-client-${release}-provenance.sigstore.json"
+source_digest="$(git rev-parse HEAD)"
 
 curl -fLO "${base}/${stem}.zip"
 curl -fLO "${base}/${stem}.spdx.json"
+curl -fLO "${base}/${stem}-licenses.txt"
 curl -fLO "${base}/SHA256SUMS.txt"
+curl -fLO "${base}/${bundle}"
 
 gh attestation verify "${stem}.zip" \
+  --bundle "${bundle}" \
   --repo openai/tunnel-client \
   --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
-  --source-ref "refs/tags/${release}"
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
 gh attestation verify "${stem}.spdx.json" \
+  --bundle "${bundle}" \
   --repo openai/tunnel-client \
   --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
-  --source-ref "refs/tags/${release}"
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
+gh attestation verify "${stem}-licenses.txt" \
+  --bundle "${bundle}" \
+  --repo openai/tunnel-client \
+  --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
 gh attestation verify SHA256SUMS.txt \
+  --bundle "${bundle}" \
   --repo openai/tunnel-client \
   --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
-  --source-ref "refs/tags/${release}"
+  --source-ref "refs/tags/${release}" \
+  --source-digest "${source_digest}" \
+  --signer-digest "${source_digest}" \
+  --predicate-type https://slsa.dev/provenance/v1 \
+  --deny-self-hosted-runners
 
 ./scripts/verify_release_archive.sh \
   --flavor "${flavor}" \
@@ -284,15 +314,32 @@ gh attestation verify SHA256SUMS.txt \
 
 Use `prefix=tunnel-client` with `flavor=client`, or
 `prefix=tunnel-client-runtime-cloudflared` with
-`flavor=runtime-cloudflared`. The attestation checks establish that the ZIP,
-sidecar, and checksum file came from this repository's release workflow. The
-archive verifier then fails closed when the published checksums do not match,
-the ZIP is too large or has unsafe, duplicate, or non-regular members, its
-embedded sidecar differs from the downloaded sidecar, or the SPDX SHA256
-inventory does not match the extracted payload. After it passes, import the
-matching `.spdx.json` file into the dependency scanner of your choice. Runtime
-releases also publish a matching `*-scan-manifest.json` that binds scanner
-scope, source archives, license evidence, and the release sidecars.
+`flavor=runtime-cloudflared`. The bundle is the release workflow's signed
+Sigstore evidence and supports verification without GitHub attestation lookup.
+It is emitted after `SHA256SUMS.txt` is attested, so it is intentionally not
+listed in that checksum file; `gh attestation verify` checks the bundle's
+signature, transparency-log material, signer workflow, source ref, source
+digest, and subject digest. The archive verifier then fails closed when the
+published checksums do not match, the ZIP is too large or has unsafe,
+duplicate, or non-regular members, its embedded sidecar differs from the
+downloaded sidecar, or the SPDX SHA256 inventory does not match the extracted
+payload. After it passes, import the matching `.spdx.json` file into the
+dependency scanner of your choice. Runtime releases also publish a matching
+`*-scan-manifest.json` that binds scanner scope, source archives, license
+evidence, and the release sidecars.
+
+For a fully disconnected verification environment, capture a trusted root from
+an independently trusted online environment before disconnecting:
+
+```sh
+gh attestation trusted-root > trusted_root.jsonl
+```
+
+Transfer that file with the release evidence and add
+`--custom-trusted-root trusted_root.jsonl` to each `gh attestation verify`
+command above. The release bundle removes the GitHub attestation API
+dependency; the trusted-root file removes the remaining online trust-root
+lookup.
 
 Build the CLI binary from a source checkout. The Make target stamps the
 checkout Git SHA into the version sent in `User-Agent` and

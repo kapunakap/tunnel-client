@@ -149,9 +149,9 @@ exports and effective config snapshots.
 
 ## Pin, provenance, and security updates
 
-The pinned version is `2026.7.2`, from the official
-[`cloudflare/cloudflared` release](https://github.com/cloudflare/cloudflared/releases/tag/2026.7.2)
-at release commit `8679787525edc8575b2948a7c4a50b6292c6d426`. The checked-in
+The pinned version is `2026.8.2`, from the official
+[`cloudflare/cloudflared` release](https://github.com/cloudflare/cloudflared/releases/tag/2026.8.2)
+at release commit `733bfb939963e150dcf5c4faddb1603f744fbc98`. The checked-in
 [`pkg/cloudflared/manifest.json`](../../pkg/cloudflared/manifest.json) records
 the exact Go pseudo-version, package path, module checksum, `go.mod` checksum,
 build timestamp, and supported platforms. `scripts/build_cloudflared.sh` uses

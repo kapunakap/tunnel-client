@@ -11,9 +11,9 @@ import unittest
 SCRIPT = pathlib.Path(__file__).with_name("prepare_sbom_source.py")
 LEGACY = "github.com/openai/tunnel-client"
 CANONICAL = "github.com/openai/tunnel-client"
-CLOUDFLARED_COMMIT = "8679787525edc8575b2948a7c4a50b6292c6d426"
+CLOUDFLARED_COMMIT = "733bfb939963e150dcf5c4faddb1603f744fbc98"
 CLOUDFLARED_MODULE_PATH = "github.com/cloudflare/cloudflared"
-CLOUDFLARED_MODULE_VERSION = "v0.0.0-20260715110107-8679787525ed"
+CLOUDFLARED_MODULE_VERSION = "v0.0.0-20260814112252-733bfb939963"
 
 
 class PrepareSbomSourceTest(unittest.TestCase):
@@ -79,8 +79,8 @@ class PrepareSbomSourceTest(unittest.TestCase):
             manifest.write_text(
                 json.dumps(
                     {
-                        "version": "2026.7.2",
-                        "build_time": "2026-07-15T11:01:07Z",
+                        "version": "2026.8.2",
+                        "build_time": "2026-08-14T11:22:52Z",
                         "release_commit": CLOUDFLARED_COMMIT,
                         "module_path": CLOUDFLARED_MODULE_PATH,
                         "package_path": f"{CLOUDFLARED_MODULE_PATH}/cmd/cloudflared",
@@ -103,9 +103,9 @@ class PrepareSbomSourceTest(unittest.TestCase):
             self.assertEqual(
                 result.stdout,
                 (
-                    "2026.7.2\t2026-07-15T11:01:07Z\t"
+                    "2026.8.2\t2026-08-14T11:22:52Z\t"
                     "github.com/cloudflare/cloudflared\t"
-                    "v0.0.0-20260715110107-8679787525ed\n"
+                    "v0.0.0-20260814112252-733bfb939963\n"
                 ),
             )
 
@@ -123,7 +123,7 @@ class PrepareSbomSourceTest(unittest.TestCase):
             ),
             (
                 "module_version",
-                {"module_version": "v0.0.0-20260715110107-000000000000"},
+                {"module_version": "v0.0.0-20260814112252-000000000000"},
                 "module_version",
             ),
         )
@@ -137,8 +137,8 @@ class PrepareSbomSourceTest(unittest.TestCase):
                     encoding="utf-8",
                 )
                 manifest_data = {
-                    "version": "2026.7.2",
-                    "build_time": "2026-07-15T11:01:07Z",
+                    "version": "2026.8.2",
+                    "build_time": "2026-08-14T11:22:52Z",
                     "release_commit": CLOUDFLARED_COMMIT,
                     "module_path": CLOUDFLARED_MODULE_PATH,
                     "package_path": f"{CLOUDFLARED_MODULE_PATH}/cmd/cloudflared",

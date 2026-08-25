@@ -16,9 +16,9 @@ func TestCloudflaredVersionCommandSurfacesPin(t *testing.T) {
 	root.SetArgs([]string{"cloudflared", "version"})
 
 	require.NoError(t, root.Execute())
-	require.Contains(t, stdout.String(), "bundled cloudflared 2026.7.2")
-	require.Contains(t, stdout.String(), "module: github.com/cloudflare/cloudflared@v0.0.0-20260715110107-8679787525ed")
-	require.Contains(t, stdout.String(), "release commit: 8679787525edc8575b2948a7c4a50b6292c6d426")
+	require.Contains(t, stdout.String(), "bundled cloudflared 2026.8.2")
+	require.Contains(t, stdout.String(), "module: github.com/cloudflare/cloudflared@v0.0.0-20260814112252-733bfb939963")
+	require.Contains(t, stdout.String(), "release commit: 733bfb939963e150dcf5c4faddb1603f744fbc98")
 	require.Contains(t, stdout.String(), "security patch owner: tunnel-client maintainers")
 }
 

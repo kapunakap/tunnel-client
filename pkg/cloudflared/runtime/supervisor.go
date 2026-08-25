@@ -373,7 +373,9 @@ func (s *Supervisor) waitForExit() {
 	s.exitedDone = true
 	stopping := s.stopping
 	s.mu.Unlock()
-	close(exited)
+	// Stop waits on exited before returning, so publish the terminal readiness
+	// state before releasing that waiter.
+	defer close(exited)
 	if stopping {
 		s.state.setNotReady("cloudflared stopped")
 		s.logger.Info("bundled cloudflared stopped")

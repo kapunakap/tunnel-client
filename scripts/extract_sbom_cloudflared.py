@@ -9,7 +9,7 @@ import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 
-EXPECTED_ROOT = "cloudflared-8679787525edc8575b2948a7c4a50b6292c6d426"
+EXPECTED_ROOT = "cloudflared-733bfb939963e150dcf5c4faddb1603f744fbc98"
 
 
 class CloudflaredArchiveError(RuntimeError):

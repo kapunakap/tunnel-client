@@ -29,17 +29,17 @@
       "runtime-cloudflared"
     ]
   },
-  "cloudflaredManifestSHA256": "149c1b5c0095ffab41c3986d620ca18c35373e05c5b6ca0bea88ac19f6d4a7a5",
+  "cloudflaredManifestSHA256": "80003d8a8f38d6a0bd74aabc096e9f99a6e8fad8ed4da699e26a8231fa453aa1",
   "baselineScope": "canonical six-platform staged payload union",
   "documents": {
     "tunnel-client.spdx.json": {
-      "sha256": "3967cd5ed7c873785ac854e55710dad2d0eba45134f237d692882e708a26663a"
+      "sha256": "88152bfac27fcfe2d97199a2e1c023c60d80b69fc0465fc01080c7c9be1b5bd2"
     },
     "tunnel-client-runtime.spdx.json": {
       "sha256": "8d5c606c2728e35d388b1cae0ae7b29eaa671ba8f86db97803bea182dbdc2513"
     },
     "tunnel-client-runtime-cloudflared.spdx.json": {
-      "sha256": "66fcf9356c1d8427f385baefbe3a7298ff4466857416203c862972a2b3bfe8e7"
+      "sha256": "cdf9ad8b5fd120a796b60ae564496e838a40d2917fd8d3f0ef078b2f8273b0c5"
     }
   }
 }

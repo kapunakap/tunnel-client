@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).with_name("extract_sbom_cloudflared.py")
-ROOT = "cloudflared-8679787525edc8575b2948a7c4a50b6292c6d426"
+ROOT = "cloudflared-733bfb939963e150dcf5c4faddb1603f744fbc98"
 
 
 class ExtractSbomCloudflaredTest(unittest.TestCase):

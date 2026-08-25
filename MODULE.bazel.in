@@ -7,9 +7,9 @@ tunnel_client_http_file = use_repo_rule(
 # archive checksum pins both the source and its checked-in vendor tree.
 tunnel_client_http_file(
     name = "tunnel_client_cloudflared_source_archive",
-    downloaded_file_path = "cloudflared-8679787525edc8575b2948a7c4a50b6292c6d426.tar.gz",
-    sha256 = "788bc636cfe876a038104d9eb976b78e9dbc8e6a815f4e1980eab11420b70277",
+    downloaded_file_path = "cloudflared-733bfb939963e150dcf5c4faddb1603f744fbc98.tar.gz",
+    sha256 = "4ee24c9250a287246605e4a20d7d8655a0a06c47fccdb6b4cd69e6d9936b8885",
     urls = [
-        "https://github.com/cloudflare/cloudflared/archive/8679787525edc8575b2948a7c4a50b6292c6d426.tar.gz",
+        "https://github.com/cloudflare/cloudflared/archive/733bfb939963e150dcf5c4faddb1603f744fbc98.tar.gz",
     ],
 )

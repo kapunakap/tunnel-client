@@ -857,11 +857,38 @@ func (p *mcpProcessor) forwardResponses(ctx context.Context, conn mcpclient.Forw
 		attrs = post.appendTunnelServiceRequestIDAttr(attrs)
 		logger.WarnContext(ctx, "dispatcher posted terminal downstream error response to control plane", attrs...)
 	}
+	postStdioDiscoveryTimeoutResponse := func() {
+		encodedError, err := buildJSONRPCErrorResponseWithCode(
+			req,
+			mcpclient.StdioDiscoveryLegacyErrorCode,
+			"downstream stdio discovery timed out",
+		)
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to encode stdio discovery timeout response", slog.String("error", err.Error()))
+			return
+		}
+		statusCode := responseCode
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+		respHeaders := jsonRPCResponseHeaders(ctx, logger, responseHeaders)
+		post := p.postTunnelResponse(ttlCtx, cmd.RequestID(), types.NewTunnelResponse(channel, encodedError, statusCode, respHeaders))
+		if post.err != nil {
+			logger.ErrorContext(ctx, "failed to post stdio discovery timeout response", post.errorAttrs()...)
+			return
+		}
+		p.metrics.recordCommandLatencies(ctx, p.tunnelID, statusCode, metricAttrs, cmd.EnqueuedAt(), cmd.PolledAt(), latencyRecorded)
+		responseDelivered = true
+		terminalResponseDelivered = true
+		logger.InfoContext(ctx, "dispatcher surfaced stdio discovery timeout for legacy fallback", slog.Int("status_code", statusCode))
+	}
 
 	for {
 		msg, readErr := conn.Read(ttlCtx)
 		if readErr != nil {
 			switch {
+			case mcpclient.IsStdioDiscoveryTimeout(readErr):
+				postStdioDiscoveryTimeoutResponse()
 			case errors.Is(readErr, mcp.ErrConnectionClosed) || errors.Is(readErr, io.EOF):
 				logger.DebugContext(ctx, "MCP connection closed while reading response", tunnelFailureLogAttrs(classifyTunnelFailure(0, readErr), classifyTransportErrorKind(0, readErr))...)
 				postTerminalErrorResponse(readErr)
@@ -1158,6 +1185,22 @@ func buildJSONRPCErrorResponse(req *jsonrpc.Request, statusCode int, cause error
 		},
 	}
 	return jsonrpc.EncodeMessage(resp)
+}
+
+func buildJSONRPCErrorResponseWithCode(req *jsonrpc.Request, code int64, message string) ([]byte, error) {
+	if req == nil {
+		return nil, fmt.Errorf("nil request provided to build error response")
+	}
+	if message == "" {
+		message = "mcp protocol error"
+	}
+	return jsonrpc.EncodeMessage(&jsonrpc.Response{
+		ID: req.ID,
+		Error: &jsonrpc.Error{
+			Code:    code,
+			Message: message,
+		},
+	})
 }
 
 func ensureDefaultAcceptHeader(headers http.Header) http.Header {

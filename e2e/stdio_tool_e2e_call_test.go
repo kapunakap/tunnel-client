@@ -62,35 +62,60 @@ func TestHarnessStdioServerDiscoverFallsBackToLegacyInitialize(t *testing.T) {
 					tb.Fatalf("discovery response = type %q status %d", resp.ResponseType, resp.ResponseCode)
 				}
 				var wire struct {
-					ID     string `json:"id"`
-					Result struct {
-						ResultType        string                     `json:"resultType"`
-						SupportedVersions []string                   `json:"supportedVersions"`
-						Capabilities      map[string]any             `json:"capabilities"`
-						Meta              map[string]json.RawMessage `json:"_meta"`
-					} `json:"result"`
+					ID    string `json:"id"`
+					Error struct {
+						Code int64 `json:"code"`
+					} `json:"error"`
 				}
 				if err := json.Unmarshal(resp.JSONResponse, &wire); err != nil {
-					tb.Fatalf("decode discovery response: %v", err)
+					tb.Fatalf("decode discovery error: %v", err)
 				}
-				if wire.ID != "discover-1" || wire.Result.ResultType != "complete" {
-					tb.Fatalf("unexpected discovery identity/result: %+v", wire)
-				}
-				if len(wire.Result.SupportedVersions) != 1 || wire.Result.SupportedVersions[0] != "2024-11-05" {
-					tb.Fatalf("unexpected legacy versions: %v", wire.Result.SupportedVersions)
-				}
-				if _, ok := wire.Result.Capabilities["tools"]; !ok {
-					tb.Fatalf("legacy capabilities missing tools: %v", wire.Result.Capabilities)
-				}
-				var serverInfo map[string]string
-				if err := json.Unmarshal(wire.Result.Meta["io.modelcontextprotocol/serverInfo"], &serverInfo); err != nil {
-					tb.Fatalf("decode synthetic serverInfo: %v", err)
-				}
-				if serverInfo["name"] != "bash" {
-					tb.Fatalf("unexpected synthetic serverInfo: %v", serverInfo)
+				if wire.ID != "discover-1" || wire.Error.Code != -32601 {
+					tb.Fatalf("unexpected discovery error: %+v", wire)
 				}
 			},
 		}},
+	}
+	initializeCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-initialize-after-discover",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"initialize-after-discover","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"chatgpt","version":"test"}}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: "cmd-initialize-after-discover",
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) || resp.ResponseCode != http.StatusOK {
+					tb.Fatalf("initialize response = type %q status %d", resp.ResponseType, resp.ResponseCode)
+				}
+				if !bytes.Contains(resp.JSONResponse, []byte(`"protocolVersion":"2024-11-05"`)) {
+					tb.Fatalf("unexpected initialize response: %s", string(resp.JSONResponse))
+				}
+			},
+		}},
+	}
+	notificationCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-initialized-after-discover",
+			json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/initialized"}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: "cmd-initialized-after-discover",
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				if resp.ResponseType != string(wiretypes.ResponsePayloadNotifyAck) || resp.ResponseCode != http.StatusOK {
+					tb.Fatalf("initialized response = type %q status %d", resp.ResponseType, resp.ResponseCode)
+				}
+			},
+		}},
+	}
+	listCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-tools-list-after-discover",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"tools-list-after-discover","method":"tools/list","params":{}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-tools-list-after-discover"}},
 	}
 	toolCommand := mocktunnelservice.CommandResponse{
 		Command: mocktunnelservice.NewCommand(
@@ -113,8 +138,8 @@ func TestHarnessStdioServerDiscoverFallsBackToLegacyInitialize(t *testing.T) {
 
 	h := harnesspkg.NewHarness(t,
 		harnesspkg.WithMCPCommand(mockmcpserver.StdioServerCommand(t)),
-		harnesspkg.WithScenarioTimeout(4*time.Second),
-		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, toolCommand)),
+		harnesspkg.WithScenarioTimeout(5*time.Second),
+		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, initializeCommand, notificationCommand, listCommand, toolCommand)),
 	)
 	h.ExecuteScenarious(t)
 
@@ -122,7 +147,7 @@ func TestHarnessStdioServerDiscoverFallsBackToLegacyInitialize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read stdio message log: %v", err)
 	}
-	if got, want := string(messages), "server/discover\ninitialize\nnotifications/initialized\ntools/call\n"; got != want {
+	if got, want := string(messages), "server/discover\ninitialize\nnotifications/initialized\ntools/list\ntools/call\n"; got != want {
 		t.Fatalf("unexpected stdio compatibility sequence: got %q want %q", got, want)
 	}
 }
@@ -169,6 +194,14 @@ func TestHarnessStdioServerDiscoverPreservesModernNativePath(t *testing.T) {
 			},
 		}},
 	}
+	listCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-modern-tools-list",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"modern-tools-list","method":"tools/list","params":{}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-modern-tools-list"}},
+	}
 	toolCommand := mocktunnelservice.CommandResponse{
 		Command: mocktunnelservice.NewCommand(
 			"cmd-modern-tool",
@@ -181,7 +214,7 @@ func TestHarnessStdioServerDiscoverPreservesModernNativePath(t *testing.T) {
 	h := harnesspkg.NewHarness(t,
 		harnesspkg.WithMCPCommand(mockmcpserver.StdioServerCommand(t)),
 		harnesspkg.WithScenarioTimeout(4*time.Second),
-		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, toolCommand)),
+		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, listCommand, toolCommand)),
 	)
 	h.ExecuteScenarious(t)
 
@@ -189,8 +222,127 @@ func TestHarnessStdioServerDiscoverPreservesModernNativePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read stdio message log: %v", err)
 	}
-	if got, want := string(messages), "server/discover\ntools/call\n"; got != want {
+	if got, want := string(messages), "server/discover\ntools/list\ntools/call\n"; got != want {
 		t.Fatalf("modern discovery was translated unexpectedly: got %q want %q", got, want)
+	}
+}
+
+func TestHarnessStdioServerDiscoverRecognizedModernErrorDoesNotFallback(t *testing.T) {
+	t.Setenv("MOCK_MCP_SERVER_DISCOVER_MODE", "modern-error")
+	messageLog := t.TempDir() + "/stdio-messages.log"
+	t.Setenv("MOCK_MCP_MESSAGE_LOG", messageLog)
+
+	discoverCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-modern-error-discover",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"modern-error-discover","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"chatgpt","version":"test"},"io.modelcontextprotocol/clientCapabilities":{}}}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: "cmd-modern-error-discover",
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				var wire struct {
+					Error struct {
+						Code int64 `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(resp.JSONResponse, &wire); err != nil {
+					tb.Fatalf("decode modern protocol error: %v", err)
+				}
+				if wire.Error.Code != -32022 {
+					tb.Fatalf("modern protocol error code = %d, want -32022", wire.Error.Code)
+				}
+			},
+		}},
+	}
+	listCommand := mocktunnelservice.CommandResponse{
+		Command:           mocktunnelservice.NewCommand("cmd-modern-error-tools-list", json.RawMessage(`{"jsonrpc":"2.0","id":"modern-error-tools-list","method":"tools/list","params":{}}`), nil),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-modern-error-tools-list"}},
+	}
+
+	h := harnesspkg.NewHarness(t,
+		harnesspkg.WithMCPCommand(mockmcpserver.StdioServerCommand(t)),
+		harnesspkg.WithScenarioTimeout(4*time.Second),
+		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, listCommand)),
+	)
+	h.ExecuteScenarious(t)
+
+	messages, err := os.ReadFile(messageLog)
+	if err != nil {
+		t.Fatalf("read stdio message log: %v", err)
+	}
+	if got, want := string(messages), "server/discover\ntools/list\n"; got != want {
+		t.Fatalf("recognized modern error triggered legacy initialization: got %q want %q", got, want)
+	}
+}
+
+func TestHarnessStdioServerDiscoverTimeoutFallsBackToUpstreamInitialize(t *testing.T) {
+	t.Setenv("MOCK_MCP_SERVER_DISCOVER_MODE", "timeout")
+	t.Setenv("MOCK_MCP_SERVER_DISCOVER_TIMEOUT_SECONDS", "3")
+	t.Setenv("MOCK_MCP_REQUIRE_INITIALIZED", "1")
+	messageLog := t.TempDir() + "/stdio-messages.log"
+	t.Setenv("MOCK_MCP_MESSAGE_LOG", messageLog)
+
+	discoverCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-timeout-discover",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"timeout-discover","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"chatgpt","version":"test"},"io.modelcontextprotocol/clientCapabilities":{}}}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{
+			RequestID: "cmd-timeout-discover",
+			Assert: func(tb testing.TB, resp mocktunnelservice.ReceivedResponse) {
+				if resp.ResponseType != string(wiretypes.ResponsePayloadJSONRPC) || resp.ResponseCode != http.StatusOK {
+					tb.Fatalf("timeout response = type %q status %d", resp.ResponseType, resp.ResponseCode)
+				}
+				var wire struct {
+					Error struct {
+						Code int64 `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(resp.JSONResponse, &wire); err != nil {
+					tb.Fatalf("decode timeout response: %v", err)
+				}
+				if wire.Error.Code != -32000 {
+					tb.Fatalf("timeout response code = %d, want -32000", wire.Error.Code)
+				}
+			},
+		}},
+	}
+	initializeCommand := mocktunnelservice.CommandResponse{
+		Command: mocktunnelservice.NewCommand(
+			"cmd-timeout-initialize",
+			json.RawMessage(`{"jsonrpc":"2.0","id":"timeout-initialize","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"chatgpt","version":"test"}}}`),
+			nil,
+		),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-timeout-initialize"}},
+	}
+	notificationCommand := mocktunnelservice.CommandResponse{
+		Command:           mocktunnelservice.NewCommand("cmd-timeout-initialized", json.RawMessage(`{"jsonrpc":"2.0","method":"notifications/initialized"}`), nil),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-timeout-initialized"}},
+	}
+	listCommand := mocktunnelservice.CommandResponse{
+		Command:           mocktunnelservice.NewCommand("cmd-timeout-tools-list", json.RawMessage(`{"jsonrpc":"2.0","id":"timeout-tools-list","method":"tools/list","params":{}}`), nil),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-timeout-tools-list"}},
+	}
+	toolCommand := mocktunnelservice.CommandResponse{
+		Command:           mocktunnelservice.NewCommand("cmd-timeout-tool", json.RawMessage(`{"jsonrpc":"2.0","id":"timeout-tool","method":"tools/call","params":{"name":"hello","arguments":{"name":"Ada"}}}`), nil),
+		ExpectedResponses: []mocktunnelservice.ExpectedResponse{{RequestID: "cmd-timeout-tool"}},
+	}
+
+	h := harnesspkg.NewHarness(t,
+		harnesspkg.WithMCPCommand(mockmcpserver.StdioServerCommand(t)),
+		harnesspkg.WithScenarioTimeout(9*time.Second),
+		harnesspkg.WithControlPlaneOptions(mocktunnelservice.WithCommandResponses(discoverCommand, initializeCommand, notificationCommand, listCommand, toolCommand)),
+	)
+	h.ExecuteScenarious(t)
+
+	messages, err := os.ReadFile(messageLog)
+	if err != nil {
+		t.Fatalf("read stdio message log: %v", err)
+	}
+	if got, want := string(messages), "server/discover\ninitialize\nnotifications/initialized\ntools/list\ntools/call\n"; got != want {
+		t.Fatalf("unexpected timeout compatibility sequence: got %q want %q", got, want)
 	}
 }
 

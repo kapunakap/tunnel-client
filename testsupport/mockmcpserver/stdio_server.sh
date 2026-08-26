@@ -33,11 +33,23 @@ while IFS= read -r line; do
       if [[ -n "${MOCK_MCP_MESSAGE_LOG:-}" ]]; then
         printf 'server/discover\n' >> "$MOCK_MCP_MESSAGE_LOG"
       fi
-      if [[ "${MOCK_MCP_SERVER_DISCOVER_MODE:-}" == "modern" ]]; then
+      case "${MOCK_MCP_SERVER_DISCOVER_MODE:-legacy}" in
+        modern)
         printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"modern-bash","version":"0.0"}}}}\n' "$id"
-      else
-        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}\n' "$id"
-      fi
+        ;;
+        modern-error)
+          printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32022,"message":"unsupported protocol version","data":{"supported":["2026-07-28"],"requested":"2026-07-28"}}}\n' "$id"
+          ;;
+        timeout)
+          sleep "${MOCK_MCP_SERVER_DISCOVER_TIMEOUT_SECONDS:-3}"
+          ;;
+        error)
+          printf '{"jsonrpc":"2.0","id":%s,"error":{"code":%s,"message":"configured discovery error"}}\n' "$id" "${MOCK_MCP_SERVER_DISCOVER_ERROR_CODE:--32602}"
+          ;;
+        *)
+          printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}\n' "$id"
+          ;;
+      esac
       ;;
     *\"initialize\"*)
       if [[ -n "${MOCK_MCP_MESSAGE_LOG:-}" ]]; then
@@ -46,6 +58,9 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"bash","version":"0.0"}}}\n' "$id"
       ;;
     *\"tools/list\"*)
+      if [[ -n "${MOCK_MCP_MESSAGE_LOG:-}" ]]; then
+        printf 'tools/list\n' >> "$MOCK_MCP_MESSAGE_LOG"
+      fi
       printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"hello","description":"hello","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}]}}\n' "$id"
       ;;
     *\"tools/call\"*)

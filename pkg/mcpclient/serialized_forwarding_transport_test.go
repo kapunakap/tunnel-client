@@ -219,6 +219,7 @@ func TestStdioDiscoveryCompatibilityDoesNotFallbackOnReadFailure(t *testing.T) {
 			_, err = conn.Read(context.Background())
 			if testCase.name == "timeout" {
 				require.True(t, IsStdioDiscoveryTimeout(err))
+				require.True(t, transport.(*serializedForwardingTransport).isRetiredResponseID(discoverID))
 			} else {
 				require.ErrorIs(t, err, testCase.err)
 			}
@@ -226,6 +227,56 @@ func TestStdioDiscoveryCompatibilityDoesNotFallbackOnReadFailure(t *testing.T) {
 			requireLifecycleLockReleased(t, transport.(*serializedForwardingTransport))
 		})
 	}
+}
+
+func TestStdioDiscoveryTimeoutRetiresLateResponseBeforeInitialize(t *testing.T) {
+	t.Parallel()
+
+	baseConn := newStubSerializedForwardingConnection()
+	discoverID := mustMakeID(t, "late-discover")
+	initializeID := mustMakeID(t, "initialize-after-late-discover")
+	readCount := 0
+	baseConn.readFunc = func(context.Context) (jsonrpc.Message, error) {
+		readCount++
+		switch readCount {
+		case 1:
+			return nil, context.DeadlineExceeded
+		case 2:
+			return &jsonrpc.Response{
+				ID:     discoverID,
+				Result: json.RawMessage(`{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}`),
+			}, nil
+		default:
+			return &jsonrpc.Response{
+				ID:     initializeID,
+				Result: json.RawMessage(`{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"legacy","version":"0.0"}}`),
+			}, nil
+		}
+	}
+
+	transport := NewStdioForwardingTransportWithDiscoveryCompatibility(&stubSerializedForwardingTransport{conn: baseConn}, false)
+	discoverConn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = discoverConn.Write(context.Background(), nil, &jsonrpc.Request{ID: discoverID, Method: serverDiscoverMethod, Params: validDiscoveryParams()})
+	require.NoError(t, err)
+	_, err = discoverConn.Read(context.Background())
+	require.True(t, IsStdioDiscoveryTimeout(err))
+	serializedTransport := transport.(*serializedForwardingTransport)
+	require.True(t, serializedTransport.isRetiredResponseID(discoverID))
+	require.Zero(t, baseConn.closeCalls.Load(), "discovery timeout must preserve the shared stdio process")
+
+	initializeConn, err := transport.Connect(context.Background())
+	require.NoError(t, err)
+	_, err = initializeConn.Write(context.Background(), nil, &jsonrpc.Request{ID: initializeID, Method: "initialize"})
+	require.NoError(t, err)
+	msg, err := initializeConn.Read(context.Background())
+	require.NoError(t, err)
+	response, ok := msg.(*jsonrpc.Response)
+	require.True(t, ok)
+	require.Equal(t, initializeID, response.ID)
+	require.False(t, serializedTransport.isRetiredResponseID(discoverID), "late discovery response should consume its retired ID")
+	require.Equal(t, []string{serverDiscoverMethod, "initialize"}, baseConn.writtenMethods())
+	require.Zero(t, baseConn.closeCalls.Load(), "late discovery response must not close the shared stdio process")
 }
 
 func validDiscoveryParams() json.RawMessage {

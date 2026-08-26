@@ -43,6 +43,10 @@ while IFS= read -r line; do
         timeout)
           sleep "${MOCK_MCP_SERVER_DISCOVER_TIMEOUT_SECONDS:-3}"
           ;;
+        late-response)
+          sleep "${MOCK_MCP_SERVER_DISCOVER_TIMEOUT_SECONDS:-3}"
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}}\n' "$id"
+          ;;
         error)
           printf '{"jsonrpc":"2.0","id":%s,"error":{"code":%s,"message":"configured discovery error"}}\n' "$id" "${MOCK_MCP_SERVER_DISCOVER_ERROR_CODE:--32602}"
           ;;

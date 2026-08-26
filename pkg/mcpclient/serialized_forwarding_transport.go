@@ -314,7 +314,12 @@ func (c *serializedForwardingConnection) Read(ctx context.Context) (jsonrpc.Mess
 		if err != nil || msg == nil {
 			if discoveryRead && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 				c.transport.markDiscoveryLegacy()
-				c.release()
+				if !c.RetireResponseDeadline() {
+					// A stale discovery response must never reach the next logical
+					// request. If the retired-ID table cannot accept this ID, close
+					// the shared physical connection instead of releasing it.
+					_ = c.Close()
+				}
 				return nil, newStdioDiscoveryTimeoutError(stdioDiscoveryTimeout, err)
 			}
 			if err != nil && c.shouldAwaitDeadlineRetirement(ctx, err) {
@@ -567,9 +572,10 @@ func (c *serializedForwardingConnection) Close() error {
 	return c.base.Close()
 }
 
-// RetireResponseDeadline prevents one response deadline from closing a shared
-// physical transport. It returns false for initialize or for transports that
-// do not support retirement, so the caller can retain the fail-closed path.
+// RetireResponseDeadline prevents one response deadline or equivalent
+// compatibility timeout from closing a shared physical transport. It returns
+// false for initialize or for transports that do not support retirement, so
+// the caller can retain the fail-closed path.
 //
 // For a known-written request, the response ID is recorded before the lifecycle
 // slot is released. A later logical request can then discard the stale response

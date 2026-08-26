@@ -276,8 +276,8 @@ func TestHarnessStdioServerDiscoverRecognizedModernErrorDoesNotFallback(t *testi
 	}
 }
 
-func TestHarnessStdioServerDiscoverTimeoutFallsBackToUpstreamInitialize(t *testing.T) {
-	t.Setenv("MOCK_MCP_SERVER_DISCOVER_MODE", "timeout")
+func TestHarnessStdioServerDiscoverTimeoutDiscardsLateResponseBeforeInitialize(t *testing.T) {
+	t.Setenv("MOCK_MCP_SERVER_DISCOVER_MODE", "late-response")
 	t.Setenv("MOCK_MCP_SERVER_DISCOVER_TIMEOUT_SECONDS", "3")
 	t.Setenv("MOCK_MCP_REQUIRE_INITIALIZED", "1")
 	messageLog := t.TempDir() + "/stdio-messages.log"
